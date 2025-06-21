@@ -1,0 +1,13 @@
+RewriteEngine On
+
+# Redirect to HTTPS and non-www
+RewriteCond %{HTTPS} off [OR]
+RewriteCond %{HTTP_HOST} ^www\. [NC]
+RewriteRule ^ https://degra.af%{REQUEST_URI} [L,R=301]
+
+# Security headers
+Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+Header set Content-Security-Policy "default-src 'self'; img-src 'self' https:; script-src 'self' https://cdn.jsdelivr.net/npm/bootstrap@5.3.3; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net/npm/bootstrap@5.3.3; connect-src 'self';"
+Header set X-Content-Type-Options "nosniff"
+Header set X-Frame-Options "SAMEORIGIN"
+Header set X-XSS-Protection "1; mode=block"

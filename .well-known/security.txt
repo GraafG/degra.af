@@ -1,0 +1,6 @@
+# security.txt
+Contact: mailto:security@degra.af
+Expires: 2026-06-21T00:00:00.000Z
+Preferred-Languages: en
+Canonical: https://degra.af/.well-known/security.txt
+Policy: https://degra.af/privacy.html
