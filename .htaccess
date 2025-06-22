@@ -10,3 +10,10 @@ Header set Content-Security-Policy "default-src 'self'; img-src 'self' https: da
 Header set X-Content-Type-Options "nosniff"
 Header set X-Frame-Options "SAMEORIGIN"
 Header set X-XSS-Protection "1; mode=block"
+
+# Deny access to dotfiles and directories (except .well-known)
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteCond %{REQUEST_URI} !^/\.well-known/
+  RewriteRule (?:^|/)(\.|\.git|\.github) - [R=404,L]
+</IfModule>
