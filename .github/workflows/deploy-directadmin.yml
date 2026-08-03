@@ -42,7 +42,7 @@ jobs:
           scan_tmp="$(mktemp)"
           for attempt in 1 2 3; do
             if ssh-keyscan -T 15 -p "$SSH_PORT" "$SSH_HOST" > "$scan_tmp" 2> "$scan_tmp.err" && [ -s "$scan_tmp" ]; then
-              cat "$scan_tmp" >> ~/.ssh/known_hosts
+              cat "$scan_tmp" > ~/.ssh/known_hosts
               chmod 644 ~/.ssh/known_hosts
               echo "ssh-keyscan succeeded on attempt $attempt."
               rm -f "$scan_tmp" "$scan_tmp.err"
