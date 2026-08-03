@@ -17,15 +17,55 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Prepare SSH key
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
         run: |
+          set -euo pipefail
+
           mkdir -p ~/.ssh
-          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -p ${{ secrets.SSH_PORT }} ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+
+          if [ -n "${SSH_KNOWN_HOSTS:-}" ]; then
+            printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+            chmod 644 ~/.ssh/known_hosts
+            echo "Using pinned host key from SSH_KNOWN_HOSTS."
+            exit 0
+          fi
+
+          echo "::warning::SSH_KNOWN_HOSTS is not set; falling back to ssh-keyscan (trust-on-first-use)"
+
+          scan_tmp="$(mktemp)"
+          for attempt in 1 2 3; do
+            if ssh-keyscan -T 15 -p "$SSH_PORT" "$SSH_HOST" > "$scan_tmp" 2> "$scan_tmp.err" && [ -s "$scan_tmp" ]; then
+              cat "$scan_tmp" >> ~/.ssh/known_hosts
+              chmod 644 ~/.ssh/known_hosts
+              echo "ssh-keyscan succeeded on attempt $attempt."
+              rm -f "$scan_tmp" "$scan_tmp.err"
+              exit 0
+            fi
+            echo "ssh-keyscan attempt $attempt failed or returned no keys."
+            sed 's/^/  /' "$scan_tmp.err" || true
+            [ "$attempt" -lt 3 ] && sleep 5 || true
+          done
+
+          rm -f "$scan_tmp" "$scan_tmp.err"
+          echo "::error::ssh-keyscan failed to obtain a host key after 3 attempts; refusing to deploy without a verified host key."
+          exit 1
 
       - name: Deploy via rsync
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_TARGET_PATH: ${{ secrets.SSH_TARGET_PATH }}
         run: |
+          set -euo pipefail
           rsync -avz --delete \
-            -e "ssh -i ~/.ssh/id_ed25519 -p ${{ secrets.SSH_PORT }}" \
+            -e "ssh -i ~/.ssh/id_ed25519 -p $SSH_PORT -o StrictHostKeyChecking=yes" \
             ./ \
-            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:${{ secrets.SSH_TARGET_PATH }}
+            "$SSH_USER@$SSH_HOST:$SSH_TARGET_PATH"
