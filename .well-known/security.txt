@@ -1,6 +1,6 @@
 # security.txt
 Contact: mailto:security@degra.af
-Expires: 2026-06-21T00:00:00.000Z
+Expires: 2027-08-03T00:00:00.000Z
 Preferred-Languages: en
 Canonical: https://degra.af/.well-known/security.txt
-Policy: https://degra.af/privacy.html
+Policy: https://github.com/GraafG/degra.af/blob/main/SECURITY.md
