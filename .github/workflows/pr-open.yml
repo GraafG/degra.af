@@ -61,3 +61,94 @@ jobs:
           esac
 
           exit "$rc"
+
+      - name: mod_rewrite must be enabled in the top-level context
+        run: |
+          set -euo pipefail
+
+          # Guards against a silent failure mode: without `RewriteEngine On`,
+          # mod_rewrite ignores every Rewrite* line in this file. There is no
+          # error, no log entry and no 5xx -- the rules stay textually perfect
+          # and become permanently inert, so the www -> apex redirect simply
+          # stops working while the config still reviews as correct.
+          #
+          # This is a realised copy-propagation risk, not a hypothetical: the
+          # redirect from this file was circulated to sibling repos with the
+          # directive stripped, and was caught by hand once. The next copy is
+          # the one nobody catches.
+          #
+          # Deliberately NOT asserted:
+          #
+          #   Ordering. It is tempting to require `RewriteEngine On` before the
+          #   first Rewrite* line, because that is how the file reads. But the
+          #   directive is a per-context configuration flag settled when httpd
+          #   merges the config, not a sequential switch -- within one context
+          #   the last value wins regardless of where the rules sit relative to
+          #   it. An ordering arm would be stricter than the server and would
+          #   one day go red on a file that works.
+          #
+          #   Count. This file legitimately sets the directive twice: once at
+          #   the top level and once inside <IfModule mod_rewrite.c>. An
+          #   "exactly one" arm would go red on the current, deployed, working
+          #   configuration -- a gate whose first firing is guaranteed wrong.
+          #
+          # Red on a working file is the expensive failure: it teaches people to
+          # edit the gate, so it gets deleted rather than debugged, costing the
+          # coverage it was added to provide.
+
+          # Resolve the effective TOP-LEVEL setting the way httpd does: track
+          # container nesting, ignore anything inside a <Section>, and let the
+          # last value in the top-level context win.
+          scan="$(awk '
+            { line = $0 }
+
+            # Strip whole-line comments. A commented-out directive must not
+            # satisfy the gate, and a comment mentioning <IfModule> must not
+            # shift the nesting depth. Apache treats a trailing # as literal,
+            # so only leading-# lines are comments.
+            { sub(/^[ \t]*#.*$/, "", line) }
+
+            line ~ /^[ \t]*<\/[A-Za-z]/ { depth--; next }
+            line ~ /^[ \t]*<[A-Za-z]/   { depth++; next }
+
+            {
+              l = tolower(line)
+              if (depth == 0) {
+                if (l ~ /^[ \t]*rewriteengine[ \t]+on[ \t]*$/)       { seen_on = 1; last = "on" }
+                else if (l ~ /^[ \t]*rewriteengine[ \t]+off[ \t]*$/) { last = "off" }
+              }
+            }
+
+            END { printf "%s %s\n", (seen_on ? "yes" : "no"), (last == "" ? "unset" : last) }
+          ' .htaccess)"
+
+          seen_on="${scan%% *}"
+          effective="${scan##* }"
+
+          echo "top-level RewriteEngine: present=$seen_on effective=$effective"
+
+          # Report every arm before exiting: a checker that stops at the first
+          # failure hides the state of the arms after it.
+          rc=0
+
+          if [ "$seen_on" = "yes" ]; then
+            echo "ok: 'RewriteEngine On' present in the top-level context"
+          else
+            echo "FAIL: no 'RewriteEngine On' in the top-level context of .htaccess."
+            echo "      mod_rewrite will ignore every Rewrite* line in this file."
+            echo "      The www -> apex redirect becomes inert with no error and"
+            echo "      no log entry. A nested directive inside <IfModule> does"
+            echo "      not enable the rules that live at the top level."
+            rc=1
+          fi
+
+          if [ "$effective" = "off" ]; then
+            echo "FAIL: the top-level RewriteEngine is effectively Off."
+            echo "      A later 'RewriteEngine Off' in the same context wins over"
+            echo "      an earlier On, disabling the rules regardless of position."
+            rc=1
+          else
+            echo "ok: top-level RewriteEngine is not switched Off"
+          fi
+
+          exit "$rc"
