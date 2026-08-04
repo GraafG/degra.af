@@ -13,6 +13,37 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+        with:
+          # Nothing in this workflow needs git authentication after the
+          # checkout. Left at the default (true), actions/checkout writes an
+          # `AUTHORIZATION: basic <base64>` extraheader into .git/config and
+          # leaves it there for the rest of the job -- and this workflow runs
+          # on pull_request, executing scripts from the PR branch. A fork PR
+          # gets a read-only token on a public repo, so this is hardening
+          # rather than a live hole, but the credential simply need not exist.
+          persist-credentials: false
+
+      - name: no workflow checkout may persist credentials
+        run: |
+          set -euo pipefail
+
+          # Widened from the deploy-only arm. That arm reads
+          # deploy-directadmin.yml by name, which was right while that was the
+          # only workflow with a checkout and became narrower than its name the
+          # moment a second appeared -- so pr-open.yml itself shipped four
+          # unhardened checkouts while asserting the property about another file.
+          #
+          # This iterates every workflow instead of naming one, and the checker
+          # parses the YAML rather than grepping it, because this very file
+          # contains "persist-credentials: false" four times in gate TEXT while
+          # the checkouts were unhardened. A grep passes that state.
+          #
+          # The deploy arm is deliberately NOT removed: there the credential can
+          # be published to a public web root by the rsync, which is a different
+          # consequence from being present in a PR job, and it belongs next to
+          # the excludes it is paired with.
+          python3 -m pip install --quiet --disable-pip-version-check pyyaml
+          python3 .github/checks/workflow-checkout-hardening.py
 
       - name: HSTS header must not advertise preload consent
         run: |
@@ -632,6 +663,15 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+        with:
+          # Nothing in this workflow needs git authentication after the
+          # checkout. Left at the default (true), actions/checkout writes an
+          # `AUTHORIZATION: basic <base64>` extraheader into .git/config and
+          # leaves it there for the rest of the job -- and this workflow runs
+          # on pull_request, executing scripts from the PR branch. A fork PR
+          # gets a read-only token on a public repo, so this is hardening
+          # rather than a live hole, but the credential simply need not exist.
+          persist-credentials: false
 
       - name: Install PyYAML
         run: python3 -m pip install --quiet pyyaml
@@ -707,6 +747,27 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+        with:
+          # Nothing in this workflow needs git authentication after the
+          # checkout. Left at the default (true), actions/checkout writes an
+          # `AUTHORIZATION: basic <base64>` extraheader into .git/config and
+          # leaves it there for the rest of the job -- and this workflow runs
+          # on pull_request, executing scripts from the PR branch. A fork PR
+          # gets a read-only token on a public repo, so this is hardening
+          # rather than a live hole, but the credential simply need not exist.
+          persist-credentials: false
+
+      - name: Negative-test the workflow-checkout-hardening check
+        run: |
+          set -euo pipefail
+
+          # An assertion about ABSENCE of a credential is the kind most likely
+          # to be structurally incapable of firing, and this one iterates a
+          # DISCOVERED set, where the classic silent pass is a zero-iteration
+          # loop. Two of the nine rows drive exactly that: the action renamed,
+          # and no workflow files at all. Both must be red.
+          python3 -m pip install --quiet --disable-pip-version-check pyyaml
+          python3 .github/checks/workflow-checkout-hardening.selftest.py
 
       - name: Negative-test the robots-txt-not-retyped check
         run: bash .github/checks/htaccess-content-type-scope.selftest.sh
@@ -729,6 +790,15 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+        with:
+          # Nothing in this workflow needs git authentication after the
+          # checkout. Left at the default (true), actions/checkout writes an
+          # `AUTHORIZATION: basic <base64>` extraheader into .git/config and
+          # leaves it there for the rest of the job -- and this workflow runs
+          # on pull_request, executing scripts from the PR branch. A fork PR
+          # gets a read-only token on a public repo, so this is hardening
+          # rather than a live hole, but the credential simply need not exist.
+          persist-credentials: false
 
       - name: Setup node
         uses: actions/setup-node@v7
