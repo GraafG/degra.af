@@ -411,6 +411,77 @@ jobs:
             rc=1
           fi
 
+          # 5. The push paths filter must still cover what the rsync publishes.
+          #
+          #    The deploy trigger is now an allowlist (site/** plus the deploy
+          #    workflow itself). The regression this defends is not someone
+          #    deleting the filter -- that only makes deploys noisy again, which
+          #    is loud. It is someone moving the rsync source (site/ -> public/)
+          #    and leaving the filter reading site/**, after which every content
+          #    change is filtered out and the deploy simply never runs. Nothing
+          #    turns red: the site keeps serving the last deployed bytes, and the
+          #    repository and production diverge silently for as long as nobody
+          #    loads a page they just changed. Property 4 pins the source and this
+          #    pins the filter to it, so the pair cannot drift apart.
+          #
+          #    paths-ignore is rejected outright rather than merely discouraged.
+          #    A denylist trigger is correct only until the next path is added
+          #    and gives no signal at the moment it stops being correct -- the
+          #    same shape that published .git/config.
+          pf="$(printf '%s\n' "$live" | awk '
+            /^[ \t]*paths-ignore:/          { print "__PATHS_IGNORE__" }
+            /^[ \t]*paths:[ \t]*$/          { inp=1; next }
+            inp==1 && /^[ \t]*-[ \t]*[^ \t]/ {
+                                              s=$0
+                                              sub(/^[ \t]*-[ \t]*/, "", s)
+                                              gsub(/[\047\042]/, "", s)
+                                              sub(/[ \t]+$/, "", s)
+                                              print s
+                                              next
+                                            }
+            inp==1 && /[^ \t]/             { inp=0 }
+          ')"
+
+          if printf '%s\n' "$pf" | grep -qxF -- '__PATHS_IGNORE__'; then
+            echo "FAIL: the deploy trigger uses paths-ignore."
+            echo "      paths-ignore is a denylist: every path not named in it"
+            echo "      triggers a deploy, so it is correct only until the next"
+            echo "      file is added and says nothing when it stops being."
+            echo "      Use paths: (an allowlist) naming what the rsync sends."
+            rc=1
+          elif [ -z "$pf" ]; then
+            echo "FAIL: the deploy push trigger has no paths: filter."
+            echo "      $wf is expected to deploy only when the published tree or"
+            echo "      the deploy itself changes. If removing the filter is"
+            echo "      deliberate, this check has to be removed deliberately too."
+            rc=1
+          else
+            # $src was normalised to the rsync source above (expected: site/).
+            #
+            # -F is load-bearing, not defensive. Without it these are regexes:
+            # 'site/**' has * as a quantifier, so it does not match the literal
+            # two asterisks it is looking for -- the arm was RED on the shipped,
+            # correct config until a green control caught it. And the workflow
+            # path is full of unescaped dots, which would match any character
+            # and accept a filter entry that merely resembles it.
+            want_src="${src}**"
+            miss=""
+            printf '%s\n' "$pf" | grep -qxF -- "$want_src" || miss="$miss $want_src"
+            printf '%s\n' "$pf" | grep -qxF -- "$wf"       || miss="$miss $wf"
+            if [ -z "$miss" ]; then
+              echo "ok: deploy paths filter covers the rsync source ($want_src) and $wf"
+            else
+              echo "FAIL: the deploy paths: filter does not cover:$miss"
+              echo "      The rsync source is '${src}', so the filter must contain"
+              echo "      '${want_src}' or content changes will not trigger a deploy."
+              echo "      It must also contain '$wf', or a change to the rsync"
+              echo "      flags ships without ever being executed."
+              echo "      Observed filter entries:"
+              printf '%s\n' "$pf" | sed 's/^/        /'
+              rc=1
+            fi
+          fi
+
           exit "$rc"
   # Separate job on purpose. It mutates .htaccess in its own checkout to prove
   # the assertion arms above can actually fail, so it must never be able to hand

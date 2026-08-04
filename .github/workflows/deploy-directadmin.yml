@@ -4,6 +4,46 @@ on:
   push:
     branches:
       - main
+    # An ALLOWLIST, deliberately not paths-ignore. The set of paths that do not
+    # affect the deploy is unbounded and grows every time anyone adds a file; the
+    # set that does affect it is exactly the rsync source plus this file. That is
+    # the same argument that moved the rsync source from ./ to site/ -- a denylist
+    # is correct only until the next thing is added to it, and nothing tells you
+    # when that moment arrives. Spelling the trigger as paths-ignore would
+    # reintroduce in the TRIGGER the shape that was just removed from the RSYNC.
+    #
+    # Measured, not assumed: site/ is full of hidden paths -- site/.htaccess and
+    # site/.well-known/security.txt are the two most deploy-critical files in the
+    # repository -- and a matcher that skipped dotfiles would silently stop
+    # deploying .htaccess changes while looking correct. GitHub's matcher was
+    # probed directly on a branch, one commit per row so the filter was evaluated
+    # per push rather than over a batch:
+    #
+    #   probe/visible.txt          GREEN CONTROL   FIRED
+    #   probe/.dotfile                             FIRED    <- dotfile matches
+    #   probe/.hiddendir/inner.txt                 FIRED    <- under hidden dir
+    #   OUTSIDE.txt                RED CONTROL     did not fire
+    #
+    # The red control is what makes the three greens mean anything: a filter that
+    # fired on everything would have produced the same three greens.
+    #
+    # This file is listed because a change to the rsync flags that never runs is
+    # a change that was never exercised. Property 5 in pr-open.yml asserts that
+    # this list still covers the rsync source, because the dangerous regression
+    # is not deleting the filter -- it is moving the source and leaving the filter
+    # behind, after which content changes silently stop deploying.
+    #
+    # Known cost, stated rather than hidden: until now every merge redeployed, so
+    # the deploy was incidentally the only thing reconciling server-side drift
+    # (a hand edit through the DirectAdmin file manager, a half-finished earlier
+    # deploy). Filtering removes that incidental repair on CI-only merges. It was
+    # never a designed control and nothing depends on it, but it was real, and
+    # the honest replacement is a scheduled read-only drift check comparing live
+    # bytes to the git blob -- not a scheduled rsync, which would be an
+    # unattended write to production that nobody asked for.
+    paths:
+      - 'site/**'
+      - '.github/workflows/deploy-directadmin.yml'
 
 permissions:
   contents: read
