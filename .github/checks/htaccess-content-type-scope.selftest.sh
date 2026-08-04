@@ -49,7 +49,9 @@ repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
 CHECKER=".github/checks/htaccess-content-type-scope.sh"
-SRC=".htaccess"
+# The site lives under site/ so the rsync source is an allowlist by
+# construction. This is the deployed .htaccess; there is no other one.
+SRC="site/.htaccess"
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT

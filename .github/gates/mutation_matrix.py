@@ -50,7 +50,7 @@ import yaml
 
 REPO = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO / ".github" / "workflows" / "pr-open.yml"
-HTACCESS = REPO / ".htaccess"
+HTACCESS = REPO / "site" / ".htaccess"
 JOB = "validate"
 
 # CI runs on ubuntu, where `bash` is bash. On Windows the name can resolve to a
@@ -63,7 +63,7 @@ BASH = os.environ.get("GATE_BASH") or shutil.which("bash") or "bash"
 STEP_REWRITE = "mod_rewrite must be enabled in the top-level context"
 STEP_SECTXT = "security.txt must be served as text/plain with charset=utf-8"
 STEP_SCOPE = "robots.txt must not be retyped by any content-type directive"
-STEP_DEPLOY = "deploy must not publish .git or .github"
+STEP_DEPLOY = "deploy must publish site/ only, never the repository root"
 STEP_HOST = "www must redirect to the apex, and only for the apex host"
 
 # Each step mutates exactly one real artefact. Every distinct target is saved
@@ -99,6 +99,8 @@ M_NO_DELEXCL = "FAIL: the deploy rsync excludes .git but does not use --delete-e
 OK_PERSIST = "ok: deploy checkout sets persist-credentials: false"
 OK_EXCLUDE = "ok: rsync excludes .git and .github"
 OK_DELEXCL = "ok: rsync uses --delete-excluded, so an already-published .git is removed"
+M_NO_SITE = "FAIL: the deploy rsync source is"
+OK_SITE = "ok: rsync source is site/, so the deploy is an allowlist"
 
 # The canonical-host arm asserts behaviour under a real Apache, so its markers
 # name the failing ROW of the table rather than a property of the regex. The
@@ -259,6 +261,29 @@ MATRIX = [
      lambda t: t.replace("rsync -avz --delete --delete-excluded \\",
                          "# rsync would use --delete-excluded here\n          rsync -avz --delete \\"),
      False, M_NO_DELEXCL),
+
+    # --- the allowlist property itself ----------------------------------
+    # Every one of these restores the denylist shape that published
+    # .git/config. They are separate cases rather than one, because the arm
+    # asserts the source positively and each of these is a different way of
+    # being not-site/ -- an arm enumerating bad sources would miss whichever
+    # spelling someone actually reaches for.
+    (STEP_DEPLOY, "rsync source reverted to ./ (the shape that leaked .git/config)",
+     lambda t: t.replace("            site/ \\\n", "            ./ \\\n"),
+     False, M_NO_SITE),
+    (STEP_DEPLOY, "rsync source reverted to a bare .",
+     lambda t: t.replace("            site/ \\\n", "            . \\\n"),
+     False, M_NO_SITE),
+    (STEP_DEPLOY, "rsync source moved up a level to ../",
+     lambda t: t.replace("            site/ \\\n", "            ../ \\\n"),
+     False, M_NO_SITE),
+    (STEP_DEPLOY, "rsync source commented out (prose still names site/)",
+     lambda t: t.replace("            site/ \\\n", "            # site/\n"),
+     False, M_NO_SITE),
+    (STEP_DEPLOY, "GREEN: an unrelated --exclude added alongside the site/ source",
+     lambda t: t.replace("            --exclude='.github' \\\n",
+                         "            --exclude='.github' \\\n            --exclude='*.map' \\\n"),
+     True, OK_SITE),
 
     # --- canonical host, asserted behaviourally -------------------------
     (STEP_HOST, "POSITIVE CONTROL: tree as shipped", lambda t: t, True, OK_HOST),
