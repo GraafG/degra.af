@@ -62,7 +62,7 @@ BASH = os.environ.get("GATE_BASH") or shutil.which("bash") or "bash"
 
 STEP_REWRITE = "mod_rewrite must be enabled in the top-level context"
 STEP_SECTXT = "security.txt must be served as text/plain with charset=utf-8"
-STEP_SCOPE = "security.txt content-type must not leak onto other .txt files"
+STEP_SCOPE = "robots.txt must not be retyped by any content-type directive"
 STEP_DEPLOY = "deploy must not publish .git or .github"
 STEP_HOST = "www must redirect to the apex, and only for the apex host"
 
@@ -87,11 +87,11 @@ M_SWITCHED_OFF = "FAIL: the top-level RewriteEngine is effectively Off."
 M_NO_FORCETYPE = "FAIL: no ForceType for security.txt"
 M_NO_CHARSET = "FAIL: the ForceType value does not carry charset=utf-8."
 M_NOT_PLAIN = "FAIL: media type is not text/plain"
-M_LEAK = "FAIL: a content-type directive applies beyond security.txt"
+M_LEAK = "FAIL[robots-txt-not-retyped]: a content-type directive in"
 
 OK_REWRITE = "ok: 'RewriteEngine On' present in the top-level context"
 OK_CHARSET = "ok: charset=utf-8 present"
-OK_SCOPED = "ok: no content-type directive reaches beyond security.txt"
+OK_SCOPED = "ok[robots-txt-not-retyped]: no content-type or charset directive in"
 
 M_NO_PERSIST = "FAIL: the deploy checkout does not set persist-credentials: false."
 M_NO_EXCLUDE = "FAIL: the deploy rsync is missing exclusions:"
