@@ -1,0 +1,57 @@
+name: security.txt validity
+
+# PORTED FROM free4me.nl @ aceb677, .github/workflows/securitytxt-validity.yml.
+#
+# Expiry is the one property that changes with NO COMMIT. Every other check in
+# this repo can only break when someone edits a file, which is exactly when CI
+# runs. This one breaks on a date, so a pull_request/push trigger is
+# structurally the wrong instrument - it would only notice while doing something
+# else. This workflow is the arm that runs when nothing has happened.
+#
+# It checks the LIVE origin, not the repo. A valid value in the repo that never
+# deployed is not a valid file on the internet, and RFC 9116 s2.5.5 talks about
+# the file a researcher fetches. This repo has a live example of why that
+# distinction is not pedantry: until PR #16 the deploy shipped the repository
+# root, and several files' published state and committed state disagreed.
+#
+# A scheduled workflow that has never run is an unverified premise. Trigger it
+# once by hand (Actions -> this workflow -> Run workflow) after merging; a green
+# there converts the assumption into evidence.
+on:
+  schedule:
+    # 07:00 UTC daily. The 30-day margin in securitytxt-expiry.mjs means this
+    # goes red for ~30 consecutive days before the file is actually void, so
+    # missing a few runs is survivable.
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  expiry:
+    runs-on: ubuntu-latest
+    name: Live security.txt is not expiring
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Nothing here pushes, so the GITHUB_TOKEN has no reason to be written
+          # to .git/config as an http.extraheader.
+          persist-credentials: false
+
+      - name: Setup node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      # No npm ci: the checker has no dependencies. Installing them would add a
+      # daily failure mode unrelated to the thing being measured - a red here
+      # must mean the served file is expiring, not that a registry was down.
+      - name: Check the served security.txt
+        run: node .github/checks/securitytxt-expiry.mjs --url https://degra.af/.well-known/security.txt
+
+      # Same file over the www host. www.degra.af 301s to the apex, so with
+      # redirect: follow this asserts the redirect chain still terminates at a
+      # valid file - not merely that the apex is healthy.
+      - name: Check it again via the www host
+        run: node .github/checks/securitytxt-expiry.mjs --url https://www.degra.af/.well-known/security.txt
