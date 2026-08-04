@@ -286,6 +286,20 @@ mut_header_merge_content_type() {
   append_directives "$1" 'Header merge Content-Type "text/plain; charset=utf-8"'
 }
 
+# `unset` is not merely a type change. Measured on httpd:2.4: it removes the
+# Content-Type header ENTIRELY and the response is still 200, so the client has
+# no declared type for robots.txt and sniffs. Both spellings do it. These were
+# handled by the checker but not pinned until the measurement replaced the
+# earlier defence of them, which was "nobody writes that legitimately" -- an
+# argument about authors rather than a result.
+mut_header_unset_content_type() {
+  append_directives "$1" 'Header unset Content-Type'
+}
+
+mut_header_always_unset_content_type() {
+  append_directives "$1" 'Header always unset Content-Type'
+}
+
 # --------------------------------------------------------- green mutations
 
 mut_single_quotes() {
@@ -368,6 +382,15 @@ red_case "Header edit Content-Type (rewrites the value in place: measured text/p
 
 red_case "Header setifempty Content-Type (measured: robots.txt gains charset=utf-8)" \
   "Header setifempty Content-Type applies in a scope that reaches robots.txt" mut_header_setifempty_content_type
+
+# Measured on httpd:2.4: `unset` strips the Content-Type header entirely and the
+# response is still 200, so the client sniffs. A change in how robots.txt is
+# served, not a non-event.
+red_case "Header unset Content-Type (measured: header removed entirely, still 200)" \
+  "Header unset Content-Type applies in a scope that reaches robots.txt" mut_header_unset_content_type
+
+red_case "Header always unset Content-Type (same removal via the 'always' spelling)" \
+  "Header unset Content-Type applies in a scope that reaches robots.txt" mut_header_always_unset_content_type
 
 green_case "the checked-in .htaccess exactly as deployed"
 
