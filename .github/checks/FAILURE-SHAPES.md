@@ -665,3 +665,103 @@ the greens especially, because a suite of only reds cannot detect over-strictnes
 **Rule.** *Growing the red arms and growing the green controls both fail here.
 The suite tests what its author thought of, and neither direction of growth
 escapes the author.*
+
+## 15. The container settles semantics; only the host settles configuration
+
+A fixture can prove what Apache *does*. It cannot prove what *this server is
+configured to do*, and the two are written in the same syntax, tested by the same
+harness, and recorded in the same comment block. A suite can be exhaustive about
+the first and silent about the second while looking complete.
+
+**Instance (a production outage, in this estate, tonight).** A sister repo merged
+a change removing an `X-Forwarded-Proto` condition from an HTTPS redirect, on the
+reasoning that `%{HTTPS}` already covered it. That reasoning is correct Apache
+semantics and would reproduce in any container. **That host terminates TLS at a
+proxy, so `%{HTTPS}` is never `on`** -- the condition being removed was the only
+thing suppressing the redirect. The site went down with an infinite loop, 50
+hops. CI was green on the merged head, and **no fixture could have caught it**,
+because the decisive fact lived in the proxy rather than in the repository.
+
+**The same boundary in this repo, measured rather than assumed.** `site/.htaccess`
+contains no scheme-forcing redirect at all -- line 3 says so, and the rewrite
+inventory confirms it: one `RewriteCond` on `HTTP_HOST`, one on `REQUEST_URI`,
+and no `%{HTTPS}` anywhere. The upgrade is performed by the host:
+
+```
+http://degra.af/       -> 301 https://degra.af/        <- host, not .htaccess
+http://www.degra.af/   -> 301 https://www.degra.af/    <- host: scheme first
+https://www.degra.af/  -> 301 https://degra.af/        <- .htaccess L21-22: host
+```
+
+So the loop is **structurally impossible here**, not merely absent: the failing
+construct does not exist in the file. That is worth stating precisely, because
+"we checked and it looks fine" and "the construct is not present" decay
+differently -- the first expires the moment someone adds four lines.
+
+**The latent hazard is the helpful improvement.** Adding an HTTPS redirect to
+this `.htaccess` is exactly the change a reasonable person makes while hardening
+a site, and it is the unsun construct. It would be correct on a host that
+terminates TLS itself and a loop on one that does not, and **nothing in this
+repository records which kind this host is.** The `preload` block one file over
+exists for the identical reason: a removal that reads as a downgrade gets undone
+by someone acting reasonably on the information available to them.
+
+**Tell.** The assertion mentions a variable whose value is supplied by the
+environment rather than by the file -- `%{HTTPS}`, `%{SERVER_PORT}`,
+`%{REMOTE_ADDR}`, `AllowOverride`, whether a module is loaded at all. Or: the
+comment records a container measurement and a production claim in the same voice.
+
+**Fixture.** There isn't one, and saying so is the point. The discriminator is
+**labelling**: mark every row as *semantics* (a container settles it) or
+*configuration* (only the origin settles it, by probe, at a stated instant).
+Where the property is configuration, the honest control is a live probe on a
+schedule -- shape 9 -- not a fixture, because a fixture will agree with you.
+
+**Rule.** *A green suite means the repository is self-consistent. It is not
+evidence about the machine.*
+
+## 16. The change that installs a control is the one case the control treats specially
+
+A new control ships with a prediction about its first run. That prediction is
+made by the author, in the same breath as the design, against the same mental
+model -- so a contradiction between the two does not present as two claims to
+reconcile. It presents as one confident sentence.
+
+**Instance.** The deploy trigger here was narrowed to an allowlist: `site/**`
+plus the deploy workflow itself. The second entry was deliberate and argued for
+in the PR -- *a change to the rsync flags that never runs is a change that was
+never exercised*. The same PR predicted: *this touches only `.github/**`, so
+merging it should produce no deploy run; if one fires, revert.*
+
+A deploy fired. By the stated criterion the change should have been reverted.
+
+```
+cbe62bf  merge of the allowlist PR   -> DEPLOYED
+         files changed: .github/workflows/deploy-directadmin.yml
+                        .github/workflows/pr-open.yml
+```
+
+The first of those is the second entry in the allowlist. **The filter behaved
+exactly as designed**, and the prediction contradicted the design in the message
+that contained both. The deeper problem is not the wrong prediction: it is that
+the installing merge was **structurally incapable of testing the filter**, because
+the one path guaranteed to be in its own diff is a path the filter matches.
+
+The later ordinary merge is what discriminated:
+
+```
+e93c81b  a .github/checks-only merge  -> CodeQL only, NO deploy run
+```
+
+**Tell.** The verification named for a new control is the commit that introduces
+it. Ask whether that commit is in the control's own exempt set -- for a paths
+filter it usually is, since the control lives in a file the control names.
+
+**Fixture.** State the first-run prediction against a **later, ordinary** change,
+and name it. Where one is not available, replicate the shipped control verbatim
+on a throwaway branch and drive both polarities -- one commit per row, since a
+push is filtered as a batch, and a batch answers a different question than the
+one being asked.
+
+**Rule.** *Do not let the installing commit be the experiment. It is the one
+sample drawn from a population the control was written to exclude.*

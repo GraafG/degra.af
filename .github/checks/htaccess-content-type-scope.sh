@@ -93,6 +93,29 @@
 #   than this file" is not answered by a header alone -- a variant could be
 #   returned WITH the same type. It is the same file, byte for byte.
 #
+#   That hash is a CONTAINER-INTERNAL served-vs-on-disk comparison of the rig's
+#   own fixture. It is not a claim about production and must not be scored
+#   against it: degra.af's live robots.txt is a different file with a different
+#   hash, and finding that "mismatch" would be a correct measurement attached to
+#   the wrong referent (FAILURE-SHAPES.md shape 12).
+#
+#   WHAT THESE ROWS ARE ABOUT, and what they are not. Every row above is Apache
+#   SEMANTICS -- what mod_negotiation does when MultiViews is on -- settled in a
+#   container. None of them is a claim about THIS HOST. Measured on production
+#   2026-08-04, MultiViews is off here:
+#
+#     /robots.txt    200 text/plain                 /robots    404 text/html
+#     /privacy.html  200 text/html                  /privacy   404 text/html
+#     /index.html    200 text/html                  /index     404 text/html
+#
+#     (three extensionless twins, all 404 -- so no negotiation is occurring)
+#
+#   This STRENGTHENS the gate rather than making it redundant: it is guarding
+#   against a configuration change, not describing current behaviour. A future
+#   reader who takes the container rows as a statement about production would be
+#   wrong in a way that is invisible, because the two read identically once they
+#   are sitting in the same comment block.
+#
 #   Reproduced independently, in a second httpd:2.4 container by a different
 #   author, before this comment was widened -- the rows above are that run, not
 #   the first one. Stated because the earlier version of this note recorded a
