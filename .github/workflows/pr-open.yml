@@ -20,7 +20,7 @@ jobs:
 
           # Inspect only the live directive, never the surrounding comments
           # (which mention `preload` by name while explaining its absence).
-          line="$(grep -E '^[[:space:]]*Header[[:space:]]+always[[:space:]]+set[[:space:]]+Strict-Transport-Security' .htaccess || true)"
+          line="$(grep -E '^[[:space:]]*Header[[:space:]]+always[[:space:]]+set[[:space:]]+Strict-Transport-Security' site/.htaccess || true)"
 
           if [ -z "$line" ]; then
             echo "FAIL: no 'Header always set Strict-Transport-Security' directive in .htaccess"
@@ -138,7 +138,7 @@ jobs:
             }
 
             END { printf "%s %s\n", (seen_on ? "yes" : "no"), (last == "" ? "unset" : last) }
-          ' .htaccess)"
+          ' site/.htaccess)"
 
           seen_on="${scan%% *}"
           effective="${scan##* }"
@@ -198,7 +198,7 @@ jobs:
             }
 
             END { printf "%s|%s\n", (found ? "yes" : "no"), arg }
-          ' .htaccess)"
+          ' site/.htaccess)"
 
           found="${scan%%|*}"
           arg="${scan#*|}"
@@ -278,16 +278,17 @@ jobs:
         # what stops this arm drifting into either a gate that misses the defect
         # or a gate that is red on a working file. A suite of only red cases
         # cannot detect over-strictness, so the green cases are not decoration.
-        run: bash .github/checks/htaccess-content-type-scope.sh .htaccess robots.txt
+        run: bash .github/checks/htaccess-content-type-scope.sh site/.htaccess robots.txt
 
-      - name: deploy must not publish .git or .github
+      - name: deploy must publish site/ only, never the repository root
         run: |
           set -euo pipefail
 
-          # The deploy rsyncs the repository root to a public web root. Without
-          # exclusions that publishes .git, and actions/checkout writes an
-          # `AUTHORIZATION: basic <base64>` extraheader into .git/config when
-          # persist-credentials is left at its default of true.
+          # The deploy rsyncs to a public web root. It used to send ./, which
+          # made it a DENYLIST: everything shipped unless someone remembered an
+          # --exclude. That shape published .git/config, which carries an
+          # `AUTHORIZATION: basic <base64>` extraheader when persist-credentials
+          # is left at its default of true.
           #
           # Confirmed by probing production rather than reading the YAML: files
           # that are repository content and not site content were live --
@@ -300,8 +301,13 @@ jobs:
           # AllowOverride still being granted on the host -- both of which can
           # change with this gate staying green.
           #
-          # Three properties, asserted separately because they fail
-          # independently and each is one edit from regression.
+          # The source is now site/, which makes the deploy an ALLOWLIST: a file
+          # added to the repository root cannot be published. Property 4 asserts
+          # that, because otherwise it is merely true rather than enforced, and
+          # reverting one word restores the shape that leaked the credential.
+          #
+          # Four properties, asserted separately because they fail independently
+          # and each is one edit from regression.
 
           wf=".github/workflows/deploy-directadmin.yml"
           rc=0
@@ -354,6 +360,27 @@ jobs:
             rc=1
           fi
 
+          # 4. The source path is the allowlist. This is asserted positively --
+          #    "the source is site/" -- rather than as "the source is not ./",
+          #    because the set of wrong sources is unbounded: ./, ../, $GITHUB_WORKSPACE
+          #    and a bare . all reintroduce the denylist, and an arm enumerating
+          #    them would silently miss the next one.
+          #
+          #    Anchored on the rsync's own continuation line so a path appearing
+          #    anywhere else in the file cannot satisfy it.
+          src="$(printf '%s' "$live" | sed -n 's#^[[:space:]]*\(site/\|\./\|\.\|\.\./\)[[:space:]]*\\\\*[[:space:]]*$#\1#p' | head -1)"
+          if [ "$src" = "site/" ]; then
+            echo "ok: rsync source is site/, so the deploy is an allowlist"
+          else
+            echo "FAIL: the deploy rsync source is '${src:-not found}', not 'site/'."
+            echo "      site/ is what makes the deploy an allowlist: only files"
+            echo "      inside it can reach the web root. Any root-relative source"
+            echo "      makes it a denylist again, where a new file at the"
+            echo "      repository root is published unless someone remembers an"
+            echo "      --exclude. That shape is what published .git/config."
+            rc=1
+          fi
+
           exit "$rc"
   # Separate job on purpose. It mutates .htaccess in its own checkout to prove
   # the assertion arms above can actually fail, so it must never be able to hand
@@ -396,7 +423,7 @@ jobs:
             exit 1
           fi
 
-          HT_B64="$(base64 -w0 .htaccess 2>/dev/null || base64 .htaccess | tr -d '\n')"
+          HT_B64="$(base64 -w0 site/.htaccess 2>/dev/null || base64 site/.htaccess | tr -d '\n')"
 
           out="$(docker run --rm -e HT_B64="$HT_B64" "$IMG" bash -c '
           set -e
@@ -522,8 +549,20 @@ jobs:
           # workflow is now mutated too, and a harness that left THAT rewritten
           # would be the more dangerous of the two.
           rc=0
-          for f in .htaccess .github/workflows/deploy-directadmin.yml; do
-            expected="$(git rev-parse "HEAD:$f")"
+          for f in site/.htaccess .github/workflows/deploy-directadmin.yml; do
+            # Name the drift explicitly. Without this, a path that has moved
+            # fails as `fatal: path ... exists on disk, but not in 'HEAD'` via
+            # set -e, which is red -- correctly -- but reads as a git problem
+            # rather than as "this list no longer matches the tree". The site
+            # assets moved into site/ once already.
+            if ! expected="$(git rev-parse --verify --quiet "HEAD:$f")"; then
+              echo "::error::$f is in this restoration list but not in HEAD."
+              echo "  The list has drifted from the tree. It is not safe to"
+              echo "  report restoration as verified for a path that cannot be"
+              echo "  compared, so this is a failure rather than a skip."
+              rc=1
+              continue
+            fi
             actual="$(git hash-object "$f")"
             echo "$f"
             echo "  expected blob: $expected"
