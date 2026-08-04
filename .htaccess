@@ -1,7 +1,24 @@
 RewriteEngine On
 
 # Only redirect www to non-www (let the server handle HTTPS)
-RewriteCond %{HTTP_HOST} ^www\.degra\.af [NC]
+#
+# The trailing $ is load-bearing. Without it the pattern is an unanchored
+# prefix match, so any Host merely BEGINNING with www.degra.af matches --
+# including www.degra.af.evil.example, which would be answered with a 301.
+# Measured on httpd 2.4, AllowOverride All:
+#
+#   Host                          unanchored    with (:[0-9]+)?$
+#   www.degra.af                  301           301
+#   www.degra.af:8443             301           301
+#   degra.af                      200           200
+#   www.degra.af.evil.example     301  <- bug   200
+#
+# Note the :8443 row is identical in both columns: the unanchored form
+# passes a port probe for the same reason it matches .evil.example. A gate
+# asserting only "a :8443 Host redirects" is green on the broken config,
+# which is why this survived. The (:[0-9]+)? group is what handles the
+# port deliberately; the $ is what stops everything else.
+RewriteCond %{HTTP_HOST} ^www\.degra\.af(:[0-9]+)?$ [NC]
 RewriteRule ^(.*)$ https://degra.af/$1 [R=301,L]
 
 # Security headers

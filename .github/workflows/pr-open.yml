@@ -422,6 +422,137 @@ jobs:
   # The final step byte-compares .htaccess against HEAD and fails if the harness
   # left the file mutated: a harness that exits 0 having not restored is the
   # dangerous outcome, and it must be loud rather than silent.
+      - name: www must redirect to the apex, and only for the apex host
+        run: |
+          set -uo pipefail
+
+          # This arm asserts BEHAVIOUR under a real Apache, not the text of the regex.
+          #
+          # The defect it exists for -- a missing trailing $ on the RewriteCond host
+          # pattern -- was invisible to every probe that had been run against it,
+          # because "Host: www.degra.af:8443 redirects" is true of the correct form
+          # AND of the unanchored form. Identical observable, opposite cause. A text
+          # assertion would work, but it can only catch the mutations its author
+          # thought to spell out, and this file has already shipped one arm that was
+          # red on a legal config because its author reasoned about syntax instead of
+          # measuring behaviour. The table below is the artefact; the regex is an
+          # implementation detail, and any spelling that satisfies the table passes.
+          #
+          # If docker or the image is unavailable this exits non-zero rather than
+          # skipping. A check that silently does not run is the failure mode the
+          # whole gate is built against.
+
+          IMG="httpd:2.4"
+
+          if ! command -v docker >/dev/null 2>&1; then
+            echo "FAIL(host): docker is not available, so this arm cannot run"
+            echo "            a check that cannot run must not report success"
+            exit 1
+          fi
+
+          HT_B64="$(base64 -w0 .htaccess 2>/dev/null || base64 .htaccess | tr -d '\n')"
+
+          out="$(docker run --rm -e HT_B64="$HT_B64" "$IMG" bash -c '
+          set -e
+          printf "%s" "$HT_B64" | base64 -d > /usr/local/apache2/htdocs/.htaccess
+          printf "REAL-SITE-BODY\n" > /usr/local/apache2/htdocs/index.html
+          sed -i "s/^#LoadModule rewrite_module/LoadModule rewrite_module/" /usr/local/apache2/conf/httpd.conf
+          sed -i "s#AllowOverride None#AllowOverride All#" /usr/local/apache2/conf/httpd.conf
+          httpd -k start
+          sleep 2
+          echo "MODRW $(httpd -M 2>/dev/null | grep -c rewrite || true)"
+          probe() {
+            exec 3<>/dev/tcp/127.0.0.1/80
+            printf "GET /%s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n" "$2" "$1" >&3
+            r=$(cat <&3); exec 3<&-
+            c=$(printf "%s" "$r" | head -1 | awk "{print \$2}")
+            l=$(printf "%s" "$r" | grep -i "^Location:" | tr -d "\r" | sed "s/^[Ll]ocation: *//")
+            echo "RESULT|$1|$2|$c|$l"
+          }
+          probe "www.degra.af" ""
+          probe "WWW.DEGRA.AF" ""
+          probe "www.degra.af:8443" ""
+          probe "degra.af" ""
+          probe "www.degra.af.evil.example" ""
+          probe "www.degra.af.evil.example" "admin"
+          probe "degra.af.evil.example" ""
+          ' 2>&1)" || true
+
+          rc=0
+
+          # Instrument checks first. A uniform table is only evidence if the
+          # instrument is known to have been live when it was produced.
+          if ! printf '%s' "$out" | grep -q '^MODRW [1-9]'; then
+            echo "FAIL(host): mod_rewrite was not loaded in the test container"
+            echo "            every request would serve 200 and the table would look clean"
+            printf '%s\n' "$out" | sed 's/^/            /'
+            exit 1
+          fi
+
+          apex="$(printf '%s' "$out" | grep '^RESULT|degra.af||' | cut -d'|' -f4)"
+          if [ "$apex" != "200" ]; then
+            echo "FAIL(host): apex control did not serve 200 (got '${apex:-nothing}')"
+            echo "            .htaccess may not have been read at all"
+            printf '%s\n' "$out" | sed 's/^/            /'
+            exit 1
+          fi
+
+          expect() {   # $1=host $2=path $3=redirect|serve
+            line="$(printf '%s' "$out" | grep "^RESULT|$1|$2|")"
+            if [ -z "$line" ]; then
+              echo "FAIL(host): no result for Host:$1 /$2"
+              rc=1
+              return
+            fi
+            code="$(printf '%s' "$line" | cut -d'|' -f4)"
+            loc="$(printf '%s' "$line" | cut -d'|' -f5)"
+            case "$3" in
+              redirect)
+                if [ "$code" != "301" ]; then
+                  echo "FAIL(host): Host:$1 /$2 should 301 to the apex, got $code"
+                  rc=1
+                elif [ "${loc#https://degra.af/}" = "$loc" ]; then
+                  # The target must be the literal apex. If someone rewrites it to
+                  # use %{HTTP_HOST} this becomes an open redirect, and that is a
+                  # strictly worse bug than the one being fixed.
+                  echo "FAIL(host): Host:$1 /$2 redirected to '$loc', not the literal apex"
+                  rc=1
+                else
+                  echo "  ok   Host:$1 /$2 -> $code $loc"
+                fi
+                ;;
+              serve)
+                if [ "$code" = "301" ]; then
+                  echo "FAIL(host): Host:$1 /$2 was redirected to '$loc' but must be served"
+                  rc=1
+                else
+                  echo "  ok   Host:$1 /$2 -> $code (not redirected)"
+                fi
+                ;;
+            esac
+          }
+
+          # The canonical redirect must fire for the www host, with or without a port,
+          # and case-insensitively.
+          expect "www.degra.af"      ""      redirect
+          expect "WWW.DEGRA.AF"      ""      redirect
+          expect "www.degra.af:8443" ""      redirect
+
+          # ...and must NOT fire for anything else. The apex serves itself, and a
+          # hostname that merely begins with the www host is not the www host.
+          expect "degra.af"                  ""      serve
+          expect "www.degra.af.evil.example" ""      serve
+          expect "www.degra.af.evil.example" "admin" serve
+          expect "degra.af.evil.example"     ""      serve
+
+          if [ "$rc" -ne 0 ]; then
+            echo
+            echo "full table:"
+            printf '%s\n' "$out" | grep '^RESULT' | sed 's/^/  /'
+          fi
+
+          exit "$rc"
+
   mutation-matrix:
     runs-on: ubuntu-latest
     steps:
