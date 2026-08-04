@@ -244,95 +244,41 @@ jobs:
 
           exit "$rc"
 
-      - name: security.txt content-type must not leak onto other .txt files
-        run: |
-          set -euo pipefail
-
-          # Blast radius. The intuitive way to satisfy RFC 9116 is
-          #
-          #   AddType "text/plain; charset=utf-8" .txt
-          #
-          # which is shorter and reads better than a <Files> container -- and
-          # measured against Apache 2.4.68 it also retypes robots.txt. Every
-          # other arm in this job stays green in that state, because
-          # security.txt does get the right header. The change is correct about
-          # its target and wrong about its scope.
-          #
-          # This arm is why <Files "security.txt"> is load-bearing rather than
-          # tidy. It asserts that no content-type-setting directive applies more
-          # broadly than that one file: nothing at the top level, and nothing in
-          # a container whose pattern is wider than the file it is meant for.
-          #
-          # Corrected after this arm rejected a legal configuration. It used to
-          # flag AddType even inside <Files "security.txt">, reasoning that
-          # AddType maps an extension rather than a file. The premise is true and
-          # the conclusion does not follow: <Files> restricts which *requests* a
-          # directive applies to, which is independent of whether the directive
-          # maps an extension. Measured on Apache 2.4.68, with a negative control
-          # first so the instrument was proven before it was believed:
-          #
-          #   AllowOverride None    security.txt text/plain
-          #                         robots.txt   text/plain    (.htaccess ignored)
-          #   A top-level AddType   security.txt text/plain; charset=utf-8
-          #                         robots.txt   text/plain; charset=utf-8  RETYPED
-          #                         pgp.txt      text/plain; charset=utf-8  RETYPED
-          #   B AddType in <Files>  security.txt text/plain; charset=utf-8
-          #                         robots.txt   text/plain    NOT retyped
-          #                         pgp.txt      text/plain    NOT retyped
-          #   C ForceType in <Files> identical to B             (what ships)
-          #
-          # Row B carries its own positive control: if <Files> were being ignored
-          # wholesale, security.txt would be bare too. It is not -- the directive
-          # fired AND was scoped. So A stays gated and B is legal.
-          #
-          # The failure this arm had is the flattering one. An over-strict gate is
-          # red on things it should not be, so its 18 red arms read as thoroughness
-          # while it quietly narrowed what Apache permits. None of the green
-          # controls covered a legal AddType, because the arm and its fixtures were
-          # written by the same author holding the same wrong belief -- a green
-          # control only defends the legality somebody thought to write down.
-
-          scan="$(awk '
-            { line = $0; sub(/^[ \t]*#.*$/, "", line); l = tolower(line) }
-
-            # Track container nesting and remember whether the container we are
-            # inside is the narrow security.txt one.
-            l ~ /^[ \t]*<files[ \t]+"?security\.txt"?[ \t]*>/ { depth++; narrow = 1; next }
-            l ~ /^[ \t]*<(files|filesmatch|directory|location|locationmatch)[ \t]/ {
-              depth++; narrow = 0; next
-            }
-            l ~ /^[ \t]*<\/(files|filesmatch|directory|location|locationmatch)[ \t]*>/ {
-              depth--; if (depth < 1) narrow = 0; next
-            }
-
-            # Directives that decide or overwrite the response content type.
-            l ~ /^[ \t]*(forcetype|defaulttype)[ \t]/ ||
-            l ~ /^[ \t]*addtype[ \t]/ ||
-            l ~ /^[ \t]*header[ \t]+(always[ \t]+)?set[ \t]+content-type[ \t]/ {
-              # Inside <Files "security.txt"> the request set is already the one
-              # file, whatever the directive maps. Measured, not inferred.
-              if (narrow) next
-              bad = bad (bad ? " | " : "") $0
-              sub(/^[ \t]+/, "", bad)
-            }
-
-            END { print bad }
-          ' .htaccess)"
-
-          if [ -z "$scan" ]; then
-            echo "ok: no content-type directive reaches beyond security.txt"
-            exit 0
-          fi
-
-          echo "FAIL: a content-type directive applies beyond security.txt."
-          echo "      offending: $scan"
-          echo ""
-          echo "      Measured on Apache 2.4.68: AddType on .txt retypes"
-          echo "      robots.txt as well, and every other arm in this job stays"
-          echo "      green while it does -- security.txt really does get the"
-          echo "      right header. Keep the directive inside"
-          echo "      <Files \"security.txt\"> so the scope matches the intent."
-          exit 1
+      - name: robots.txt must not be retyped by any content-type directive
+        # Blast radius. The intuitive way to satisfy RFC 9116 is
+        #
+        #   AddType "text/plain; charset=utf-8" .txt
+        #
+        # which is shorter and reads better than a <Files> container -- and
+        # measured against Apache 2.4 it also retypes robots.txt. Every other
+        # arm in this job stays green in that state, because security.txt does
+        # get the right header. The change is correct about its target and
+        # wrong about its scope.
+        #
+        # This arm asks the question the experiment was actually run to answer:
+        # does any content-type or charset directive REACH robots.txt. The file
+        # is parsed into container scopes the way httpd merges them and the
+        # basename is tested against the enclosing <Files>/<FilesMatch>
+        # patterns, rather than matching directive spellings.
+        #
+        # It replaced an earlier arm that asked instead "is any content-type
+        # directive outside <Files \"security.txt\">". That is a proxy for this
+        # question, and the two come apart in both directions -- measured on
+        # httpd:2.4, negative control (AllowOverride None) first so the
+        # instrument was shown able to report "unchanged":
+        #
+        #   retypes robots.txt, proxy stayed green:
+        #     AddCharset utf-8 .txt              robots.txt -> charset=utf-8
+        #     AddDefaultCharset utf-8            robots.txt -> charset=utf-8
+        #   does not touch robots.txt, proxy went red:
+        #     AddType text/markdown .md          robots.txt -> bare text/plain
+        #     <FilesMatch "^security\.txt$">     robots.txt -> bare text/plain
+        #
+        # Both directions are pinned as cases in the gate-selftest job, which is
+        # what stops this arm drifting into either a gate that misses the defect
+        # or a gate that is red on a working file. A suite of only red cases
+        # cannot detect over-strictness, so the green cases are not decoration.
+        run: bash .github/checks/htaccess-content-type-scope.sh .htaccess robots.txt
 
       - name: deploy must not publish .git or .github
         run: |
@@ -597,3 +543,30 @@ jobs:
           fi
 
           echo "ok: all mutated files restored byte-for-byte"
+
+  # Separate job, deliberately, and for the same reason as mutation-matrix
+  # above: it builds mutated .htaccess fixtures to prove the reach arm fires,
+  # and nothing that mutates config may sit on a path that can reach a deploy.
+  #
+  # Isolation is topological, not a matter of ordering. This job declares no
+  # `needs:`, nothing declares `needs: gate-selftest`, it uploads no artifact
+  # and pushes nothing, and deploy lives in a different workflow file
+  # (deploy-directadmin.yml) triggered by push to main -- `needs:` edges exist
+  # only between jobs in the same workflow, so no edit to this file can put a
+  # fixture on a path to a deploy.
+  #
+  # Stronger than restoring: this harness never writes to the working tree at
+  # all. Every fixture is a copy in a scratch directory, so the failure mode
+  # where a mutation lands, the script dies under `set -e` before the restore,
+  # and the mutated config gets committed has no foothold. The run still ends
+  # by comparing .htaccess against git show HEAD:.htaccess and failing loudly
+  # if it moved.
+  gate-selftest:
+    name: Prove the robots.txt reach gate fires
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Negative-test the robots-txt-not-retyped check
+        run: bash .github/checks/htaccess-content-type-scope.selftest.sh
