@@ -418,22 +418,68 @@ jobs:
           #    immediately above the destination argument, which is what makes it the
           #    source -- then normalise the spelling and compare once. A path
           #    appearing anywhere else in the file still cannot satisfy it.
+          #
+          #    REPORT THE RAW TOKEN, COMPARE THE NORMALISED ONE. The fix above
+          #    traded message precision for correctness and no arm noticed,
+          #    because the arms scored exit codes and all three cases stayed red.
+          #    Normalisation strips leading ./ repeatedly, so the single most
+          #    consequential defect -- source './', the denylist shape that
+          #    published .git/config -- normalised to the empty string and
+          #    reported "not found", pointing the reader at a missing line rather
+          #    than at a wrong one. Measured before the fix:
+          #
+          #      source ./            -> "source is 'not found', not 'site/'"
+          #      source COMMENTED OUT -> "source is '-e \"ssh -i ...\"'"
+          #      source DELETED       -> "source is '-e \"ssh -i ...\"'"
+          #
+          #    The last two are the awk correctly reporting the line above the
+          #    destination once the real source line is gone: accurate about
+          #    position, misleading about cause, and indistinguishable from each
+          #    other. All three stayed red, so detection was never affected --
+          #    this was diagnostics only. The messages are now pinned as cases,
+          #    not merely the exit codes, so the same trade cannot be made
+          #    silently the next time this arm is widened. It has been widened
+          #    twice already.
           src_raw="$(printf '%s\n' "$live" | awk '
             /\$SSH_USER@\$SSH_HOST/ { print prev; exit }
             /[^[:space:]]/         { prev = $0 }
           ')"
-          src="$(printf '%s' "$src_raw" \
+          # Strip only the shell syntax (continuation, surrounding whitespace,
+          # matched quotes). This is the token AS WRITTEN and is what every
+          # message below quotes. Path normalisation happens separately.
+          src_disp="$(printf '%s' "$src_raw" \
             | sed -e 's/[[:space:]]*\\[[:space:]]*$//' \
                   -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
                   -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/")"
+
+          # An rsync source argument is a path and cannot begin with '-'. If the
+          # slot above the destination holds an option, the source line is not
+          # there at all -- commented out or deleted -- and naming that option as
+          # "the source" sends the reader to repair the wrong line.
+          src_missing=0
+          case "$src_disp" in
+            ""|-*) src_missing=1 ;;
+          esac
+
+          src="$src_disp"
           src="${src#\$GITHUB_WORKSPACE/}"
           src="${src#\$\{GITHUB_WORKSPACE\}/}"
           while [ "${src#./}" != "$src" ]; do src="${src#./}"; done
           src="$(printf '%s' "$src" | sed -e 's#/\./#/#g' -e 's#/\.$#/#')"
-          if [ "$src" = "site/" ]; then
+
+          if [ "$src_missing" = "1" ]; then
+            echo "FAIL: no rsync source argument found -- the source line may be"
+            echo "      commented out or deleted."
+            echo "      The line immediately above the destination is:"
+            echo "        ${src_raw:-(nothing)}"
+            echo "      which is an rsync option, not a path. The source is the"
+            echo "      allowlist: without it this check cannot tell what the"
+            echo "      deploy publishes, so it fails closed."
+            rc=1
+          elif [ "$src" = "site/" ]; then
             echo "ok: rsync source is site/, so the deploy is an allowlist"
           else
-            echo "FAIL: the deploy rsync source is '${src:-not found}', not 'site/'."
+            echo "FAIL: the deploy rsync source is '${src_disp}', not 'site/'."
             echo "      site/ is what makes the deploy an allowlist: only files"
             echo "      inside it can reach the web root. Any root-relative source"
             echo "      makes it a denylist again, where a new file at the"
@@ -486,8 +532,19 @@ jobs:
             echo "      the deploy itself changes. If removing the filter is"
             echo "      deliberate, this check has to be removed deliberately too."
             rc=1
+          elif [ "$src_missing" = "1" ]; then
+            # Property 4 could not determine the source, so "does the filter
+            # cover the source" has no referent. Saying it plainly beats
+            # computing '**' from an empty string and reporting that as the
+            # required entry, which would send the reader to fix the filter when
+            # the actual defect is in the rsync invocation. Still fails closed:
+            # an unevaluated property is not a satisfied one.
+            echo "FAIL: cannot check the paths: filter -- the rsync source could"
+            echo "      not be determined (see the source failure above). Fix the"
+            echo "      rsync invocation first; this check has no referent until"
+            echo "      then, and is not passing by default."
+            rc=1
           else
-            # $src was normalised to the rsync source above (expected: site/).
             #
             # -F is load-bearing, not defensive. Without it these are regexes:
             # 'site/**' has * as a quantifier, so it does not match the literal
@@ -503,7 +560,7 @@ jobs:
               echo "ok: deploy paths filter covers the rsync source ($want_src) and $wf"
             else
               echo "FAIL: the deploy paths: filter does not cover:$miss"
-              echo "      The rsync source is '${src}', so the filter must contain"
+              echo "      The rsync source is '${src_disp}', so the filter must contain"
               echo "      '${want_src}' or content changes will not trigger a deploy."
               echo "      It must also contain '$wf', or a change to the rsync"
               echo "      flags ships without ever being executed."

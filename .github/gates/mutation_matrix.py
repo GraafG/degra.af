@@ -100,6 +100,10 @@ OK_PERSIST = "ok: deploy checkout sets persist-credentials: false"
 OK_EXCLUDE = "ok: rsync excludes .git and .github"
 OK_DELEXCL = "ok: rsync uses --delete-excluded, so an already-published .git is removed"
 M_NO_SITE = "FAIL: the deploy rsync source is"
+# The empty-source state. Distinct from M_NO_SITE on purpose: a commented-out
+# or deleted source line has no token to quote, and the arm must not fall back
+# to naming whatever line happens to sit above the destination.
+M_NO_SRC = "FAIL: no rsync source argument found"
 OK_SITE = "ok: rsync source is site/, so the deploy is an allowlist"
 
 # The canonical-host arm asserts behaviour under a real Apache, so its markers
@@ -268,18 +272,33 @@ MATRIX = [
     # asserts the source positively and each of these is a different way of
     # being not-site/ -- an arm enumerating bad sources would miss whichever
     # spelling someone actually reaches for.
+    #
+    # Each pins the EXACT source it names, not the shared M_NO_SITE prefix.
+    # These rows all used that prefix, so they scored identically no matter
+    # which source the arm reported -- and a widening of the arm silently
+    # traded message precision away while every row stayed green. A marker
+    # that matches all variants of a message asserts only that the arm failed,
+    # which the exit code already said. Pinning the whole quoted token is what
+    # makes the row able to see a diagnostic regression at all.
     (STEP_DEPLOY, "rsync source reverted to ./ (the shape that leaked .git/config)",
      lambda t: t.replace("            site/ \\\n", "            ./ \\\n"),
-     False, M_NO_SITE),
+     False, M_NO_SITE + " './', not 'site/'."),
     (STEP_DEPLOY, "rsync source reverted to a bare .",
      lambda t: t.replace("            site/ \\\n", "            . \\\n"),
-     False, M_NO_SITE),
+     False, M_NO_SITE + " '.', not 'site/'."),
     (STEP_DEPLOY, "rsync source moved up a level to ../",
      lambda t: t.replace("            site/ \\\n", "            ../ \\\n"),
-     False, M_NO_SITE),
+     False, M_NO_SITE + " '../', not 'site/'."),
+    # Commented-out and deleted are the same state as far as the file's
+    # content goes: there is no source argument. The arm must say so, and must
+    # NOT name the preceding continuation line (the ssh -e option) as if it
+    # were the source, which is what it did before.
     (STEP_DEPLOY, "rsync source commented out (prose still names site/)",
      lambda t: t.replace("            site/ \\\n", "            # site/\n"),
-     False, M_NO_SITE),
+     False, M_NO_SRC),
+    (STEP_DEPLOY, "rsync source line deleted outright",
+     lambda t: t.replace("            site/ \\\n", ""),
+     False, M_NO_SRC),
     (STEP_DEPLOY, "GREEN: an unrelated --exclude added alongside the site/ source",
      lambda t: t.replace("            --exclude='.github' \\\n",
                          "            --exclude='.github' \\\n            --exclude='*.map' \\\n"),
@@ -310,7 +329,7 @@ MATRIX = [
     # not reasoned. This is the case the normalisation must not swallow.
     (STEP_DEPLOY, "source spelled site with no trailing slash (nests under /site/)",
      lambda t: t.replace("            site/ \\\n", "            site \\\n"),
-     False, M_NO_SITE),
+     False, M_NO_SITE + " 'site', not 'site/'."),
 
     # --- canonical host, asserted behaviourally -------------------------
     (STEP_HOST, "POSITIVE CONTROL: tree as shipped", lambda t: t, True, OK_HOST),
