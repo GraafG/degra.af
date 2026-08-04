@@ -96,23 +96,49 @@ jobs:
           # Adding more --exclude lines would have fixed the instance and kept
           # the shape.
           #
-          # The two exclusions below are now belt-and-braces rather than
-          # load-bearing: neither .git nor .github exists inside site/. They are
-          # kept because --delete-excluded is what removes an ALREADY-PUBLISHED
-          # copy from the server, and dropping them would silently retire that.
-          # Measured:
+          # The two exclusions below are belt-and-braces rather than load-bearing:
+          # nothing named .git or .github exists inside site/, so --delete alone
+          # would already prune them. They are kept for a property rather than an
+          # inventory -- if the source ever regresses to ./ in the same edit that
+          # removes the source gate, they are what stands between .git/config and
+          # the public web root. That is the exact failure this deploy has already
+          # had once, so the redundancy is deliberate.
           #
-          #   --delete --exclude=.git                     dst/.git/config PRESENT
-          #   --delete --delete-excluded --exclude=.git   dst/.git/config gone
+          # Measured in alpine:3 (rsync 3.4.3), source = site/, destination
+          # pre-seeded with .git/config, .github/, uploads/photo.jpg, OLDFILE.md:
           #
-          # rsync protects excluded paths on the receiving side from --delete,
-          # so excluding is not removing.
+          #   CONTROL: no rsync run at all      .git PRESENT  uploads PRESENT  OLDFILE PRESENT
+          #   no --delete                       .git PRESENT  uploads PRESENT  OLDFILE PRESENT
+          #   --delete alone                    .git gone     uploads gone     OLDFILE gone
+          #   --delete + excludes               .git PRESENT  uploads gone     OLDFILE gone
+          #   + --delete-excluded  [shipped]    .git gone     uploads gone     OLDFILE gone
+          #
+          # The control row is why the others can be read: it distinguishes "the
+          # rsync pruned nothing" from "the rsync did not run", which otherwise
+          # print identically.
+          #
+          # Row 4 is the reason --delete-excluded is here. rsync PROTECTS excluded
+          # paths on the receiving side from --delete, so excluding is not removing
+          # and an already-published copy would survive indefinitely.
+          #
+          # HAZARD, and it is the inverse of what --exclude reads like. On THIS
+          # invocation --exclude does not protect anything on the server; combined
+          # with --delete-excluded it is an instruction to delete it:
+          #
+          #   --exclude=uploads, shipped invocation      uploads gone     <- intent inverted
+          #   --exclude=uploads, no --delete-excluded    uploads PRESENT  <- intent honoured
+          #
+          # So an --exclude added here to preserve server-side state does the
+          # opposite of what it looks like. Anything that must persist on the
+          # server and is not in site/ cannot be protected by an --exclude on this
+          # command at all. This is a property of the flag pair, not a list of
+          # files, and it is stated that way on purpose: an inventory of what is
+          # currently published goes stale the moment a deploy runs, and a comment
+          # that was true when written is worse than no comment once it inverts.
           #
           # Note the site's own 404 rule in .htaccess cannot confirm any of this:
-          # it masks .git with a 404 whether the directory is present or absent.
-          # The evidence is this step's own log -- look for "deleting ".
-          # This deploy additionally prunes README.md, LICENSE and SECURITY.md,
-          # which are currently published and are not site content.
+          # it masks dotfiles with a 404 whether they are present or absent. The
+          # evidence is this step's own log -- look for "deleting ".
           rsync -avz --delete --delete-excluded \
             --exclude='.git' \
             --exclude='.github' \
