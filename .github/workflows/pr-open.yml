@@ -334,6 +334,81 @@ jobs:
           echo "      <Files \"security.txt\"> so the scope matches the intent."
           exit 1
 
+      - name: deploy must not publish .git or .github
+        run: |
+          set -euo pipefail
+
+          # The deploy rsyncs the repository root to a public web root. Without
+          # exclusions that publishes .git, and actions/checkout writes an
+          # `AUTHORIZATION: basic <base64>` extraheader into .git/config when
+          # persist-credentials is left at its default of true.
+          #
+          # Confirmed by probing production rather than reading the YAML: files
+          # that are repository content and not site content were live --
+          # /README.md 200, /LICENSE 200, /SECURITY.md 200 -- so the root really
+          # is mirrored. /.git/config returned 404, but a 404 is evidence that
+          # something answered, not that the file is absent: .htaccess has a
+          # single RewriteRule masking dotfiles. That rule stays as the second
+          # layer. It is not sufficient as the first, because it asserts a repo
+          # file while the property depends on mod_rewrite being loaded and
+          # AllowOverride still being granted on the host -- both of which can
+          # change with this gate staying green.
+          #
+          # Three properties, asserted separately because they fail
+          # independently and each is one edit from regression.
+
+          wf=".github/workflows/deploy-directadmin.yml"
+          rc=0
+
+          # Read only the directives, never the prose. The comment block in
+          # the deploy workflow explains these flags and necessarily names
+          # them, so a file-wide grep could be satisfied by the very text
+          # arguing for them -- a gate defeated by its own documentation.
+          # Strip whole-line comments first and assert against what is left.
+          # Verified with a fixture that comments the directives out.
+          live="$(sed 's/^[[:space:]]*#.*$//' "$wf")"
+
+          # 1. The credential must not be written into the checkout at all.
+          if printf '%s' "$live" | grep -qE '^[[:space:]]*persist-credentials:[[:space:]]*false[[:space:]]*$'; then
+            echo "ok: deploy checkout sets persist-credentials: false"
+          else
+            echo "FAIL: the deploy checkout does not set persist-credentials: false."
+            echo "      actions/checkout defaults it to true and writes an"
+            echo "      AUTHORIZATION extraheader into .git/config, which the"
+            echo "      rsync below copies to a public web root."
+            rc=1
+          fi
+
+          # 2. It must not be copied even if it is written.
+          missing=""
+          for pat in "--exclude='.git'" "--exclude='.github'"; do
+            printf '%s' "$live" | grep -qF -- "$pat" || missing="$missing $pat"
+          done
+          if [ -z "$missing" ]; then
+            echo "ok: rsync excludes .git and .github"
+          else
+            echo "FAIL: the deploy rsync is missing exclusions:$missing"
+            echo "      The repository root is rsynced to a public web root, so"
+            echo "      anything not excluded is published."
+            rc=1
+          fi
+
+          # 3. Excluding is not removing. Measured with rsync:
+          #      --delete --exclude=.git                  dst/.git/config PRESENT
+          #      --delete --delete-excluded --exclude=.git dst/.git/config gone
+          #    Without --delete-excluded a .git already on the server is
+          #    protected from --delete and survives every future deploy.
+          if printf '%s' "$live" | grep -qF -- "--delete-excluded"; then
+            echo "ok: rsync uses --delete-excluded, so an already-published .git is removed"
+          else
+            echo "FAIL: the deploy rsync excludes .git but does not use --delete-excluded."
+            echo "      rsync protects excluded paths on the receiving side from"
+            echo "      --delete, so a .git directory already on the server would"
+            echo "      survive indefinitely. Excluding is not removing."
+            rc=1
+          fi
+
+          exit "$rc"
   # Separate job on purpose. It mutates .htaccess in its own checkout to prove
   # the assertion arms above can actually fail, so it must never be able to hand
   # a mutated tree to anything that ships.
@@ -359,26 +434,35 @@ jobs:
       - name: Run the .htaccess mutation matrix
         run: python3 .github/gates/mutation_matrix.py
 
-      - name: .htaccess must be byte-identical to HEAD after mutation
+      - name: mutated files must be byte-identical to HEAD afterwards
         if: always()
         run: |
           set -euo pipefail
 
           # Runs even if the matrix failed: a failing matrix is the case most
-          # likely to have exited early and left the file mutated.
-          expected="$(git rev-parse "HEAD:.htaccess")"
-          actual="$(git hash-object .htaccess)"
+          # likely to have exited early and left a file mutated. Covers every
+          # artefact any fixture touches, not just .htaccess -- the deploy
+          # workflow is now mutated too, and a harness that left THAT rewritten
+          # would be the more dangerous of the two.
+          rc=0
+          for f in .htaccess .github/workflows/deploy-directadmin.yml; do
+            expected="$(git rev-parse "HEAD:$f")"
+            actual="$(git hash-object "$f")"
+            echo "$f"
+            echo "  expected blob: $expected"
+            echo "  actual blob:   $actual"
+            if [ "$expected" != "$actual" ]; then
+              echo "::error::$f was not restored after the mutation matrix."
+              git --no-pager diff -- "$f" || true
+              rc=1
+            fi
+          done
 
-          echo "expected blob: $expected"
-          echo "actual blob:   $actual"
-
-          if [ "$expected" != "$actual" ]; then
-            echo "::error::.htaccess was not restored after the mutation matrix."
+          if [ "$rc" -ne 0 ]; then
             echo "The working tree differs from HEAD. Nothing here reaches the"
             echo "deploy path, but a harness that fails to restore is a defect"
             echo "in the harness and must not pass quietly."
-            git --no-pager diff -- .htaccess || true
             exit 1
           fi
 
-          echo "ok: .htaccess restored byte-for-byte"
+          echo "ok: all mutated files restored byte-for-byte"
