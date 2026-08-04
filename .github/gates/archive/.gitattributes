@@ -1,0 +1,7 @@
+# These files are evidence, not source. Store them byte-for-byte so the
+# committed blob matches the artefact that produced the results in PRs #9
+# and #10 -- line-ending normalisation would silently break that.
+#
+# Scoped to this directory rather than the repo root so it cannot affect
+# .htaccess, whose blob must stay identical to main.
+*.py -text -diff
