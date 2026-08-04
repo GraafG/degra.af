@@ -95,6 +95,24 @@ jobs:
           # Red on a working file is the expensive failure: it teaches people to
           # edit the gate, so it gets deleted rather than debugged, costing the
           # coverage it was added to provide.
+          #
+          # Why this is modelled as STATE and not as a line being present:
+          # a presence check reads `RewriteEngine On` followed later by
+          # `RewriteEngine Off` as fine. Tracking the value through the parse
+          # makes catching that automatic rather than a second clause somebody
+          # has to remember to implement -- and it is the clause most likely to
+          # be dropped, because the first half is the one that reads like the
+          # requirement.
+          #
+          # Why the state model tracks <IfModule> scope rather than being flat:
+          # a flat last-value-wins model is NOT a safe simplification for this
+          # file. .htaccess sets the directive twice, and the second one lives
+          # inside <IfModule mod_rewrite.c>. Delete the top-level directive --
+          # exactly the copy-propagation mutation this gate exists to catch --
+          # and a flat model still reports effective=on from the nested one and
+          # passes, while the www -> apex rule at the top level is inert.
+          # Verified against this file: the flat model returns PASS on that
+          # mutation, the scoped model below returns FAIL.
 
           # Resolve the effective TOP-LEVEL setting the way httpd does: track
           # container nesting, ignore anything inside a <Section>, and let the
@@ -150,5 +168,78 @@ jobs:
           else
             echo "ok: top-level RewriteEngine is not switched Off"
           fi
+
+          exit "$rc"
+
+      - name: security.txt must be served as text/plain with charset=utf-8
+        run: |
+          set -euo pipefail
+
+          # RFC 9116 section 3 requires "text/plain; charset=utf-8". Apache's
+          # mime.types gives .txt a bare text/plain, so this has to be set.
+          #
+          # The value is asserted, not merely the directive's existence. A bare
+          # ForceType "text/plain" is textually present and behaviourally
+          # identical to the bug, so a "a ForceType exists" arm would pass in
+          # the exact state being fixed -- the same shape as an "an HSTS header
+          # exists" arm passing while it still advertises preload.
+
+          scan="$(awk '
+            { line = $0; sub(/^[ \t]*#.*$/, "", line); l = tolower(line) }
+
+            l ~ /^[ \t]*<files[ \t]+"?security\.txt"?[ \t]*>/ { inblock = 1; next }
+            l ~ /^[ \t]*<\/files[ \t]*>/                      { inblock = 0; next }
+
+            inblock && l ~ /^[ \t]*forcetype[ \t]/ {
+              arg = line
+              sub(/^[ \t]*[^ \t]+[ \t]+/, "", arg)   # drop the directive name
+              sub(/[ \t]+$/, "", arg)
+              found = 1
+            }
+
+            END { printf "%s|%s\n", (found ? "yes" : "no"), arg }
+          ' .htaccess)"
+
+          found="${scan%%|*}"
+          arg="${scan#*|}"
+          lower_arg="$(printf '%s' "$arg" | tr '[:upper:]' '[:lower:]')"
+
+          echo "ForceType in <Files \"security.txt\">: found=$found value=$arg"
+
+          rc=0
+
+          if [ "$found" = "yes" ]; then
+            echo "ok: ForceType present for security.txt"
+          else
+            echo "FAIL: no ForceType for security.txt in .htaccess."
+            echo "      Apache serves .txt as a bare text/plain, which does not"
+            echo "      satisfy RFC 9116 section 3."
+            rc=1
+          fi
+
+          case "$lower_arg" in
+            *text/plain*) echo "ok: media type is text/plain" ;;
+            *) echo "FAIL: media type is not text/plain (got: $arg)"; rc=1 ;;
+          esac
+
+          case "$lower_arg" in
+            *charset=utf-8*)
+              echo "ok: charset=utf-8 present"
+              ;;
+            *)
+              echo "FAIL: the ForceType value does not carry charset=utf-8."
+              echo "      A bare text/plain is textually present and behaviourally"
+              echo "      identical to having no ForceType at all. RFC 9116"
+              echo "      section 3 requires the charset."
+              rc=1
+              ;;
+          esac
+
+          # Deliberately NOT asserted: quote style. The file uses double quotes
+          # for consistency with every other quoted argument, but a single-quoted
+          # argument was measured against Apache 2.4.68 and works -- correct
+          # Content-Type, site root still 200, nothing in the error log. Gating
+          # style would put the gate red on a working configuration, which is the
+          # failure that teaches people to edit gates rather than debug them.
 
           exit "$rc"
