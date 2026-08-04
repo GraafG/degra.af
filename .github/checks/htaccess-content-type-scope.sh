@@ -73,19 +73,49 @@
 #   nulls and a null from an experiment that never ran is indistinguishable from
 #   a finding:
 #
-#     POSITIVE CONTROL   /doc  without MultiViews              -> 404
-#                        /doc  with    MultiViews              -> 200 text/plain
+#     INSTRUMENT CTL  robots.txt, no .htaccess                 -> 200 [text/plain]
+#                     robots.txt, AddType on .txt              -> 200 [text/plain;]
+#                     (differ, so the rig can see a change at all)
+#     POSITIVE CTL    /doc  without MultiViews                 -> 404
+#                     /doc  with    MultiViews                 -> 200
+#                     (differ, so MultiViews is demonstrably engaging)
 #
-#     /robots.txt  no MultiViews                               -> 200 text/plain
-#     /robots.txt  +MultiViews                                 -> 200 text/plain
-#     /robots.txt  +MultiViews, robots.txt.html present        -> 200 text/plain
+#     /robots.txt  no MultiViews                               -> 200 [text/plain]
+#     /robots.txt  +MultiViews                                 -> 200 [text/plain]
+#     /robots.txt  +MultiViews, robots.txt.html present        -> 200 [text/plain]
+#     /robots.txt  +MultiViews, robots.html present            -> 200 [text/plain]
+#     /robots.txt  +MultiViews +AddLanguage, robots.txt.en     -> 200 [text/plain]
+#
+#     served body md5 == on-disk robots.txt md5  (b6216d6...)
+#
+#   The body hash is part of the claim on purpose. Content-Type is the property
+#   this gate asserts, but the question "can negotiation serve something other
+#   than this file" is not answered by a header alone -- a variant could be
+#   returned WITH the same type. It is the same file, byte for byte.
+#
+#   Reproduced independently, in a second httpd:2.4 container by a different
+#   author, before this comment was widened -- the rows above are that run, not
+#   the first one. Stated because the earlier version of this note recorded a
+#   measurement its author had CARRIED rather than performed, which is a fine
+#   thing to do only while it is labelled. The last two rows and the body hash
+#   are new and were not in the original.
 #
 #   The first attempt at this produced a FALSE NULL and is worth recording: the
 #   variant used was doc.txt.en, and without AddLanguage the .en suffix is not a
 #   recognised extension, so MultiViews never engaged at all. Both rows returned
 #   404 and it read as "MultiViews changes nothing" -- the right conclusion from
-#   an experiment that never ran. Only the positive control caught it. See
-#   FAILURE-SHAPES.md, "the instrument that was never armed".
+#   an experiment that never ran. Only the positive control caught it. The
+#   reproduction therefore pins that exact case as its own row: +MultiViews
+#   +AddLanguage with a real robots.txt.en present is the configuration in which
+#   the false null was originally produced, and it is still a genuine null.
+#
+#   The reproduction ALSO tripped a second instance on its first run: curl is
+#   not installed in the httpd:2.4 image, so every row returned an empty header
+#   and an empty status -- six identical nulls that read exactly like a clean
+#   result. The INSTRUMENT CONTROL caught it before any row was believed, which
+#   is why that row exists and why it is listed first. The rig now speaks HTTP
+#   over bash /dev/tcp and has no external dependency that can vanish.
+#   See FAILURE-SHAPES.md, "the instrument that was never armed".
 #
 # Usage: htaccess-content-type-scope.sh [htaccess-path] [target-basename]
 
