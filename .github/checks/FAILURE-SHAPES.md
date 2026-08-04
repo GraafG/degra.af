@@ -338,10 +338,30 @@ which is precisely why nobody re-read the regex -- including its author, twice.
 **Tell.** The comment states a design principle in the abstract. Reading it
 leaves you believing the code does something you have not checked.
 
+**Why this is the more dangerous of the pair.** In shape 1 the prose is *wrong*,
+and a reader who knows the subject catches it. Here the prose is **correct** --
+enumeration really is the hazard, and the paragraph says so accurately. It is
+simply not a description of the line beneath it. A wrong comment is caught by
+the attentive reader; a right comment attached to code that does not implement
+it is camouflage, and it disarms *exactly* the reader who is paying attention,
+because their check of the reasoning passes. Correctness of the prose is what
+buys the code its pass.
+
+The same structure appears in shape 12, and the two are worth reading together:
+there, a hazard was correctly identified in the abstract and then attached to a
+specific artifact nobody scope-checked. Shape 12 is a true statement about the
+wrong referent; shape 8 is a true statement about the wrong *line*. Both **read
+as diligence and function as a false positive** -- and in both the diligence is
+real, which is why neither gets challenged.
+
 **Fixture.** None possible: no assertion can compare code against intent. The
 only instrument is to derive the arm's behaviour from *measurement* -- the
 spelling table in shape 6 -- rather than from reading the file. Treat a
 confident comment as an unverified claim, and check the load-bearing one.
+
+**Rule.** Never let a comment's *correctness* transfer to the code beneath it.
+When prose and code sit together, they are two claims, and only one of them
+runs. Check the one that runs.
 
 ---
 
@@ -682,6 +702,29 @@ thing suppressing the redirect. The site went down with an infinite loop, 50
 hops. CI was green on the merged head, and **no fixture could have caught it**,
 because the decisive fact lived in the proxy rather than in the repository.
 
+**Two corrections from the person who merged it, both of which make the shape
+sharper than "CI was green".**
+
+*It was not reasoning; it was an asserted proof from an uncheckable premise.*
+The claim rested on "a real HTTPS request carrying no `X-Forwarded-Proto`" -- a
+statement about **what the backend receives**, while the only instrument to hand
+controlled **what curl sends**. Those are different facts separated by the proxy,
+and the second cannot settle the first. The failure was not sloppiness in the
+argument; the argument was valid. It was a premise admitted without an instrument
+capable of observing it. *A proof is only as sound as the premise you can
+measure, and "I could not check it" is a load-bearing property of a premise, not
+a footnote to it.*
+
+*The estate had already fixed this exact defect once.* Commit `ba86e8f` --
+"restore the `%{HTTPS}` guard on the scheme rule, and simulate both TLS shapes"
+-- had solved it, including the two-shapes simulation that encodes precisely the
+thing later reasoned away. So this was not an unknown hazard met for the first
+time. It was **a solved problem reopened by reasoning past the solution instead
+of reading it**, which is a distinct and more preventable failure: the remedy is
+not more cleverness but `git log` on the line you are about to change. When a
+guard looks redundant, the cheapest instrument available is the commit that
+added it.
+
 **The same boundary in this repo, measured rather than assumed.** `site/.htaccess`
 contains no scheme-forcing redirect at all -- line 3 says so, and the rewrite
 inventory confirms it: one `RewriteCond` on `HTTP_HOST`, one on `REQUEST_URI`,
@@ -765,3 +808,52 @@ one being asked.
 
 **Rule.** *Do not let the installing commit be the experiment. It is the one
 sample drawn from a population the control was written to exclude.*
+
+---
+
+## 17. A pin that matches every state it covers asserts only what the exit code already said
+
+A suite that scores exit codes can tell that an arm failed. It cannot tell
+whether the arm failed *for the reason it names*. Pinning the message is the
+usual remedy -- but a pin is only worth the states it can tell apart, and a
+prefix shared by every variant of a message tells apart none of them.
+
+**Instance.** The deploy-source rows of the mutation matrix each pinned a
+required marker, so the suite looked message-pinned rather than exit-code-only.
+The marker was:
+
+```
+M_NO_SITE = "FAIL: the deploy rsync source is"
+```
+
+Five rows used it: source `./`, `.`, `../`, `site`, and commented-out. It matches
+all five, and it also matches `... is '-e "ssh -i ..."'` -- the wrong answer. So
+when a later widening of the arm traded message precision away, three rows began
+reporting misleading causes (`./` printed as *not found*; commented-out and
+deleted both printed as the **ssh option**) and **not one row moved**. The
+pinning existed, ran, and was incapable of observing the defect.
+
+Measured afterwards, against the pre-fix arm with the tokens pinned in full:
+
+```
+deploy-arm rows=21    exit-code column: 21/21 agree
+                      marker column:     3 fail
+```
+
+Twenty-one exit codes agreeing is what the suite had been reporting as success.
+
+**Tell.** The expected-message constant is a *prefix*, a substring ending before
+the variable part, or shared by name across rows that are supposed to be distinct
+cases. If two rows in a suite can swap their expected markers and both still
+pass, neither row is pinning anything: they are the same assertion written twice.
+
+**Fixture.** Ask of each pin: *which states does this distinguish?* Then check it
+by construction -- run the current pins against the **previous** version of the
+arm. A pin that passes on both versions did not participate. This is the same
+two-polarity discipline applied one level up: the arms need forced-red cases, and
+the arms' assertions need a version of the code where they are wrong.
+
+**Rule.** *An assertion is worth exactly the number of states it can separate.
+A marker matching every outcome of the branch it guards is decoration on top of
+the exit code, and it makes a suite look pinned in precisely the state where it
+is not.*
