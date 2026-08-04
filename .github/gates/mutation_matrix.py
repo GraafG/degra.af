@@ -285,6 +285,33 @@ MATRIX = [
                          "            --exclude='.github' \\\n            --exclude='*.map' \\\n"),
      True, OK_SITE),
 
+    # Spellings of the SAME source. Each was measured in alpine:3 against a
+    # fixture tree and produces a destination tree identical to site/ -- and
+    # each was RED before the arm normalised instead of enumerating. They are
+    # pinned as green so the widening cannot silently regress into the
+    # alternation it replaced. A suite of only red cases cannot detect
+    # over-strictness: it reads as thoroughness in exactly the state where the
+    # arm is wrong.
+    (STEP_DEPLOY, "GREEN: source spelled ./site/ (measured identical to site/)",
+     lambda t: t.replace("            site/ \\\n", "            ./site/ \\\n"),
+     True, OK_SITE),
+    (STEP_DEPLOY, "GREEN: source quoted as \"site/\" (measured identical)",
+     lambda t: t.replace("            site/ \\\n", "            \"site/\" \\\n"),
+     True, OK_SITE),
+    (STEP_DEPLOY, "GREEN: source spelled $GITHUB_WORKSPACE/site/ (measured identical)",
+     lambda t: t.replace("            site/ \\\n", "            $GITHUB_WORKSPACE/site/ \\\n"),
+     True, OK_SITE),
+    (STEP_DEPLOY, "GREEN: source spelled site/./ (measured identical)",
+     lambda t: t.replace("            site/ \\\n", "            site/./ \\\n"),
+     True, OK_SITE),
+    # The boundary case. One character from a legal spelling, and NOT legal:
+    # rsync without the trailing slash copies the directory itself, so the site
+    # would land at <webroot>/site/index.html and every URL would 404. Measured,
+    # not reasoned. This is the case the normalisation must not swallow.
+    (STEP_DEPLOY, "source spelled site with no trailing slash (nests under /site/)",
+     lambda t: t.replace("            site/ \\\n", "            site \\\n"),
+     False, M_NO_SITE),
+
     # --- canonical host, asserted behaviourally -------------------------
     (STEP_HOST, "POSITIVE CONTROL: tree as shipped", lambda t: t, True, OK_HOST),
     # The defect this arm was built for: an unanchored prefix match, so any
@@ -368,6 +395,7 @@ def main() -> int:
 
     failures: list[str] = []
     green_seen: dict[str, int] = {}
+    red_seen: dict[str, int] = {}
 
     try:
         for step, label, transform, expect_pass, marker in MATRIX:
@@ -396,6 +424,8 @@ def main() -> int:
                 print("verdict: PASS\n")
                 if expect_pass:
                     green_seen[step] = green_seen.get(step, 0) + 1
+                else:
+                    red_seen[step] = red_seen.get(step, 0) + 1
             else:
                 why = []
                 if not exit_ok:
@@ -419,10 +449,19 @@ def main() -> int:
 
     # A dead checker cannot produce a passing GREEN case. Requiring one per step
     # is what stops "every fixture exited non-zero" from reading as success.
+    #
+    # Both polarities are required, per .github/checks/FAILURE-SHAPES.md #6: a
+    # suite of only RED cases cannot detect over-strictness, and a suite of only
+    # GREEN cases cannot detect anything at all. The allowlist arm passed 5 red
+    # cases while rejecting four working configurations, and the red count is
+    # what made that look like thoroughness.
     for step in steps:
         if not green_seen.get(step):
             failures.append(f"[{step}] no GREEN case passed -- the checker may not be "
                             "running at all; RED results are not evidence on their own")
+        if not red_seen.get(step):
+            failures.append(f"[{step}] no RED case passed -- nothing shows this arm can "
+                            "fail, so its GREEN results are not evidence either")
 
     print("restored byte-for-byte from the in-memory originals: " + ", ".join(sorted(p.name for p in saved_bytes)))
     if failures:

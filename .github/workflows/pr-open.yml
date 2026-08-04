@@ -360,15 +360,45 @@ jobs:
             rc=1
           fi
 
-          # 4. The source path is the allowlist. This is asserted positively --
-          #    "the source is site/" -- rather than as "the source is not ./",
-          #    because the set of wrong sources is unbounded: ./, ../, $GITHUB_WORKSPACE
-          #    and a bare . all reintroduce the denylist, and an arm enumerating
-          #    them would silently miss the next one.
+          # 4. The source path is the allowlist. Asserted positively -- "the source
+          #    is site/" -- rather than as "the source is not ./", because the set
+          #    of wrong sources is unbounded and an arm enumerating them would
+          #    silently miss the next one.
           #
-          #    Anchored on the rsync's own continuation line so a path appearing
-          #    anywhere else in the file cannot satisfy it.
-          src="$(printf '%s' "$live" | sed -n 's#^[[:space:]]*\(site/\|\./\|\.\|\.\./\)[[:space:]]*\\\\*[[:space:]]*$#\1#p' | head -1)"
+          #    The previous version of this arm said exactly that in prose and then
+          #    did the opposite: it matched the source against the fixed alternation
+          #    (site/|./|.|../), so anything outside that list extracted as empty and
+          #    reported "not found". Measured in alpine:3 with rsync, against a
+          #    fixture tree, four spellings produce a destination tree IDENTICAL to
+          #    site/ -- and all four were red:
+          #
+          #      ./site/                    ./img/a.jpg ./index.html   was RED
+          #      "site/"                    ./img/a.jpg ./index.html   was RED
+          #      $GITHUB_WORKSPACE/site/    ./img/a.jpg ./index.html   was RED
+          #      site/./                    ./img/a.jpg ./index.html   was RED
+          #      site/        (shipped)     ./img/a.jpg ./index.html      GREEN
+          #      site         (no slash)    ./site/img/a.jpg ...       correctly RED
+          #      ./           (denylist)    ./site/img/a.jpg ...       correctly RED
+          #
+          #    A gate that is red on a working config gets edited by whoever hits it,
+          #    and the edit that makes it green is rarely the careful one.
+          #
+          #    So: locate the source STRUCTURALLY -- it is the continuation line
+          #    immediately above the destination argument, which is what makes it the
+          #    source -- then normalise the spelling and compare once. A path
+          #    appearing anywhere else in the file still cannot satisfy it.
+          src_raw="$(printf '%s\n' "$live" | awk '
+            /\$SSH_USER@\$SSH_HOST/ { print prev; exit }
+            /[^[:space:]]/         { prev = $0 }
+          ')"
+          src="$(printf '%s' "$src_raw" \
+            | sed -e 's/[[:space:]]*\\[[:space:]]*$//' \
+                  -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+                  -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/")"
+          src="${src#\$GITHUB_WORKSPACE/}"
+          src="${src#\$\{GITHUB_WORKSPACE\}/}"
+          while [ "${src#./}" != "$src" ]; do src="${src#./}"; done
+          src="$(printf '%s' "$src" | sed -e 's#/\./#/#g' -e 's#/\.$#/#')"
           if [ "$src" = "site/" ]; then
             echo "ok: rsync source is site/, so the deploy is an allowlist"
           else
