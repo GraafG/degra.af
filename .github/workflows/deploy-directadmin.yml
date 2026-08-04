@@ -13,6 +13,28 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # Fail closed before doing any other work: no pinned host key, no deploy.
+      # Independent of the equivalent assertion in "Prepare SSH key" by design --
+      # neither check may rely on the other's continued existence.
+      - name: Preflight - require pinned host key
+        env:
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$(printf '%s' "${SSH_KNOWN_HOSTS:-}" | tr -d '[:space:]')" ]; then
+            echo "::error::SSH_KNOWN_HOSTS is unset, empty, or whitespace-only. Refusing to deploy: the server's identity cannot be verified without a pinned host key."
+            echo "To (re)generate it, run the following against the deploy host and paste the ENTIRE output verbatim:"
+            echo "    ssh-keyscan -p <SSH_PORT> <SSH_HOST>"
+            echo "  - use the values held in this repository's SSH_PORT and SSH_HOST secrets"
+            echo "  - keep every output line; there is one per host key type and dropping the negotiated one causes a mismatch"
+            echo "  - keep the [host]:port bracket form that ssh-keyscan emits for non-default ports; do not hand-edit it"
+            echo "Then store it, e.g.: gh secret set SSH_KNOWN_HOSTS -R <owner>/<repo> < scanned-keys.txt"
+            exit 1
+          fi
+
+          echo "Preflight OK: SSH_KNOWN_HOSTS is present."
+
       - name: Checkout code
         uses: actions/checkout@v7
 
@@ -20,42 +42,32 @@ jobs:
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-          SSH_PORT: ${{ secrets.SSH_PORT }}
         run: |
           set -euo pipefail
+
+          # Second, independent assertion. Must precede any write to known_hosts
+          # so that a failure here can never leave a partial file behind for a
+          # later step to connect against.
+          if [ -z "$(printf '%s' "${SSH_KNOWN_HOSTS:-}" | tr -d '[:space:]')" ]; then
+            echo "::error::SSH_KNOWN_HOSTS is unset, empty, or whitespace-only. Refusing to write known_hosts or deploy."
+            exit 1
+          fi
 
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
           printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
 
-          if [ -n "${SSH_KNOWN_HOSTS:-}" ]; then
-            printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
-            chmod 644 ~/.ssh/known_hosts
-            echo "Using pinned host key from SSH_KNOWN_HOSTS."
-            exit 0
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+          if [ ! -s ~/.ssh/known_hosts ]; then
+            echo "::error::known_hosts is empty after writing SSH_KNOWN_HOSTS; refusing to deploy."
+            rm -f ~/.ssh/known_hosts
+            exit 1
           fi
 
-          echo "::warning::SSH_KNOWN_HOSTS is not set; falling back to ssh-keyscan (trust-on-first-use)"
-
-          scan_tmp="$(mktemp)"
-          for attempt in 1 2 3; do
-            if ssh-keyscan -T 15 -p "$SSH_PORT" "$SSH_HOST" > "$scan_tmp" 2> "$scan_tmp.err" && [ -s "$scan_tmp" ]; then
-              cat "$scan_tmp" > ~/.ssh/known_hosts
-              chmod 644 ~/.ssh/known_hosts
-              echo "ssh-keyscan succeeded on attempt $attempt."
-              rm -f "$scan_tmp" "$scan_tmp.err"
-              exit 0
-            fi
-            echo "ssh-keyscan attempt $attempt failed or returned no keys."
-            sed 's/^/  /' "$scan_tmp.err" || true
-            [ "$attempt" -lt 3 ] && sleep 5 || true
-          done
-
-          rm -f "$scan_tmp" "$scan_tmp.err"
-          echo "::error::ssh-keyscan failed to obtain a host key after 3 attempts; refusing to deploy without a verified host key."
-          exit 1
+          echo "Using pinned host key from SSH_KNOWN_HOSTS ($(wc -l < ~/.ssh/known_hosts | tr -d ' ') line(s))."
 
       - name: Deploy via rsync
         env:
