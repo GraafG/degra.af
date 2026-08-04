@@ -63,6 +63,17 @@ BASH = os.environ.get("GATE_BASH") or shutil.which("bash") or "bash"
 STEP_REWRITE = "mod_rewrite must be enabled in the top-level context"
 STEP_SECTXT = "security.txt must be served as text/plain with charset=utf-8"
 STEP_SCOPE = "security.txt content-type must not leak onto other .txt files"
+STEP_DEPLOY = "deploy must not publish .git or .github"
+
+# Each step mutates exactly one real artefact. Every distinct target is saved
+# and restored byte-for-byte, and the workflow re-checks .htaccess afterwards.
+DEPLOY_WF = REPO / ".github" / "workflows" / "deploy-directadmin.yml"
+TARGETS = {
+    STEP_REWRITE: HTACCESS,
+    STEP_SECTXT: HTACCESS,
+    STEP_SCOPE: HTACCESS,
+    STEP_DEPLOY: DEPLOY_WF,
+}
 
 TOP = "RewriteEngine On"
 FORCETYPE = 'ForceType "text/plain; charset=utf-8"'
@@ -79,6 +90,13 @@ M_LEAK = "FAIL: a content-type directive applies beyond security.txt"
 OK_REWRITE = "ok: 'RewriteEngine On' present in the top-level context"
 OK_CHARSET = "ok: charset=utf-8 present"
 OK_SCOPED = "ok: no content-type directive reaches beyond security.txt"
+
+M_NO_PERSIST = "FAIL: the deploy checkout does not set persist-credentials: false."
+M_NO_EXCLUDE = "FAIL: the deploy rsync is missing exclusions:"
+M_NO_DELEXCL = "FAIL: the deploy rsync excludes .git but does not use --delete-excluded."
+OK_PERSIST = "ok: deploy checkout sets persist-credentials: false"
+OK_EXCLUDE = "ok: rsync excludes .git and .github"
+OK_DELEXCL = "ok: rsync uses --delete-excluded, so an already-published .git is removed"
 
 
 def drop_top_level(text: str) -> str:
@@ -182,6 +200,48 @@ MATRIX = [
      lambda t: t.replace(FILES_BLOCK,
                          '<Files "security.txt">\n  AddType "text/plain; charset=utf-8" .txt\n</Files>\n'),
      True, OK_SCOPED),
+
+    # --- deploy must not publish .git or .github -------------------------------
+    # These mutate .github/workflows/deploy-directadmin.yml, not .htaccess.
+    (STEP_DEPLOY, "POSITIVE CONTROL: tree as shipped", lambda t: t, True, OK_PERSIST),
+    (STEP_DEPLOY, "persist-credentials line removed (checkout writes the token again)",
+     lambda t: t.replace("          persist-credentials: false\n", ""),
+     False, M_NO_PERSIST),
+    (STEP_DEPLOY, "persist-credentials flipped back to true",
+     lambda t: t.replace("persist-credentials: false", "persist-credentials: true"),
+     False, M_NO_PERSIST),
+    (STEP_DEPLOY, "--exclude='.git' removed (the credential file gets published)",
+     lambda t: t.replace("            --exclude='.git' \\\n", ""),
+     False, M_NO_EXCLUDE),
+    (STEP_DEPLOY, "--exclude='.github' removed (workflows get published)",
+     lambda t: t.replace("            --exclude='.github' \\\n", ""),
+     False, M_NO_EXCLUDE),
+    (STEP_DEPLOY, "--delete-excluded removed (an already-published .git survives)",
+     lambda t: t.replace(" --delete-excluded", ""),
+     False, M_NO_DELEXCL),
+    # Must stay green. Reordering the flags or reformatting the continuation
+    # lines is legal and must not be gated -- the arm asserts presence, not
+    # layout, for the same reason the RewriteEngine arm makes no ordering claim.
+    (STEP_DEPLOY, "GREEN: excludes reordered and put on one line (layout is not gated)",
+     lambda t: t.replace("            --exclude='.git' \\\n            --exclude='.github' \\\n",
+                         "            --exclude='.github' --exclude='.git' \\\n"),
+     True, OK_EXCLUDE),
+    (STEP_DEPLOY, "GREEN: an unrelated extra exclusion added",
+     lambda t: t.replace("            --exclude='.git' \\\n",
+                         "            --exclude='.git' \\\n            --exclude='node_modules' \\\n"),
+     True, OK_EXCLUDE),
+    # The arm must read directives, not prose. The deploy workflow's own comment
+    # block names every flag while arguing for it, so a file-wide grep would be
+    # satisfied by the documentation -- a gate defeated by its own explanation.
+    # These comment the real directives out and leave the text present.
+    (STEP_DEPLOY, "--exclude='.git' commented out (text still present, directive gone)",
+     lambda t: t.replace("            --exclude='.git' \\\n",
+                         "            # --exclude='.git'\n"),
+     False, M_NO_EXCLUDE),
+    (STEP_DEPLOY, "--delete-excluded moved into a comment only",
+     lambda t: t.replace("rsync -avz --delete --delete-excluded \\",
+                         "# rsync would use --delete-excluded here\n          rsync -avz --delete \\"),
+     False, M_NO_DELEXCL),
 ]
 
 
@@ -195,16 +255,22 @@ def extract(step_name: str) -> str:
 
 
 def main() -> int:
-    original_bytes = HTACCESS.read_bytes()
-    original = original_bytes.decode("utf-8").replace("\r\n", "\n")
-    steps = (STEP_REWRITE, STEP_SECTXT, STEP_SCOPE)
+    # Save every artefact any fixture touches, and restore all of them. Keeping
+    # bytes rather than re-encoded text means restoration is exact on every
+    # platform, including CRLF checkouts, so the workflow's blob comparison is a
+    # real check rather than accidentally true.
+    targets = sorted(set(TARGETS.values()), key=lambda p: p.name)
+    saved_bytes = {p: p.read_bytes() for p in targets}
+    saved_text = {p: b.decode("utf-8").replace("\r\n", "\n") for p, b in saved_bytes.items()}
+
+    steps = (STEP_REWRITE, STEP_SECTXT, STEP_SCOPE, STEP_DEPLOY)
     scripts = {}
     print(f"bash: {BASH}")
     for index, step in enumerate(steps):
         path = REPO / f"_extracted_gate_{index}.sh"
         path.write_text(extract(step).replace("\r\n", "\n"), encoding="utf-8", newline="\n")
         scripts[step] = path
-        print(f"extracted step: {step}")
+        print(f"extracted step: {step}  (mutates {TARGETS[step].name})")
     print()
 
     failures: list[str] = []
@@ -212,15 +278,17 @@ def main() -> int:
 
     try:
         for step, label, transform, expect_pass, marker in MATRIX:
+            target = TARGETS[step]
+            original = saved_text[target]
             mutated = transform(original)
             is_control = label.startswith("POSITIVE CONTROL")
             if mutated == original and not is_control:
                 failures.append(f"[{step}] {label}: fixture was a no-op -- it did not "
-                                "change .htaccess, so it tested nothing")
+                                f"change {target.name}, so it tested nothing")
                 print(f"=== {label} ===\nHARNESS FAILURE -- fixture was a no-op\n")
                 continue
 
-            HTACCESS.write_text(mutated, encoding="utf-8", newline="\n")
+            target.write_text(mutated, encoding="utf-8", newline="\n")
             proc = subprocess.run([BASH, str(scripts[step])], cwd=REPO,
                                   capture_output=True, text=True)
             out = proc.stdout + proc.stderr
@@ -243,12 +311,16 @@ def main() -> int:
                     why.append(f"required marker missing: {marker!r}")
                 failures.append(f"[{step}] {label}: " + "; ".join(why))
                 print("verdict: HARNESS FAILURE -- " + "; ".join(why) + "\n")
+            # Put the artefact back between cases so one fixture cannot leak
+            # into the next.
+            target.write_bytes(saved_bytes[target])
     finally:
-        # Restore the original bytes rather than re-encoding the normalised
-        # text: byte-for-byte restoration holds on every platform, including
-        # CRLF checkouts, so the workflow's blob comparison is a real check
-        # rather than accidentally true.
-        HTACCESS.write_bytes(original_bytes)
+        # Restore every artefact from its original bytes rather than
+        # re-encoding normalised text: byte-for-byte restoration holds on every
+        # platform, including CRLF checkouts, so the workflow's blob comparison
+        # is a real check rather than accidentally true.
+        for path, data in saved_bytes.items():
+            path.write_bytes(data)
         for path in scripts.values():
             path.unlink(missing_ok=True)
 
@@ -259,7 +331,7 @@ def main() -> int:
             failures.append(f"[{step}] no GREEN case passed -- the checker may not be "
                             "running at all; RED results are not evidence on their own")
 
-    print("restored .htaccess byte-for-byte from the in-memory original")
+    print("restored byte-for-byte from the in-memory originals: " + ", ".join(sorted(p.name for p in saved_bytes)))
     if failures:
         print("\nHARNESS FAILURES:")
         for item in failures:

@@ -37,6 +37,15 @@ jobs:
 
       - name: Checkout code
         uses: actions/checkout@v7
+        with:
+          # Nothing after this step needs git authentication. Left at the
+          # default (true), actions/checkout writes an
+          # `AUTHORIZATION: basic <base64>` extraheader into .git/config, and
+          # the rsync below copies the checkout to a public web root. This is
+          # the layer that stops the credential existing at all; the excludes
+          # are the layer that stops it being copied. Both, because either
+          # alone is one edit from regression and they fail independently.
+          persist-credentials: false
 
       - name: Prepare SSH key
         env:
@@ -77,7 +86,25 @@ jobs:
           SSH_TARGET_PATH: ${{ secrets.SSH_TARGET_PATH }}
         run: |
           set -euo pipefail
-          rsync -avz --delete \
+
+          # --exclude stops .git and .github being published. On its own that is
+          # not enough to remove what is already there: rsync protects excluded
+          # paths on the receiving side from --delete, so a .git directory
+          # already on the server would survive indefinitely. Measured:
+          #
+          #   --delete --exclude=.git              dst/.git/config  PRESENT
+          #   --delete --delete-excluded --exclude=.git   dst/.git/config  gone
+          #
+          # --delete-excluded is therefore load-bearing, not belt-and-braces. It
+          # only ever removes receiver-side paths matching the excludes above,
+          # which is exactly .git and .github.
+          #
+          # Note the site's own 404 rule in .htaccess cannot confirm this worked:
+          # it masks .git with a 404 whether the directory is present or absent.
+          # The evidence is this step's own log -- look for "deleting .git/".
+          rsync -avz --delete --delete-excluded \
+            --exclude='.git' \
+            --exclude='.github' \
             -e "ssh -i ~/.ssh/id_ed25519 -p $SSH_PORT -o StrictHostKeyChecking=yes" \
             ./ \
             "$SSH_USER@$SSH_HOST:$SSH_TARGET_PATH"
