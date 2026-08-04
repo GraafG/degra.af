@@ -627,6 +627,155 @@ jobs:
 
           exit "$rc"
 
+      - name: the dotfile denial must deny a file that is actually there
+        run: |
+          set -uo pipefail
+
+          # Layer 2 of the .git protection, tested against a PRESENT file.
+          #
+          # There are two independent defences against publishing a checkout:
+          #   1. the deploy rsync publishes site/ only (an allowlist)
+          #   2. .htaccess returns 404 for dotfiles and dot-directories
+          #
+          # Every existing check covers layer 1. Nothing covered layer 2 against
+          # a file that exists, and production structurally cannot: .git is
+          # correctly absent there, so the live probe
+          #
+          #     curl -o /dev/null -w '%{http_code}' https://degra.af/.git/config
+          #       -> 404
+          #
+          # returns 404 because the rule fires on the URI, not because the file
+          # is missing -- and it would return 404 either way. That probe has
+          # been cited (by me, more than once) as evidence the leak is closed.
+          # It is not evidence: it cannot distinguish the state we want from the
+          # state we fixed. This arm is the instrument that can, because a
+          # container can put the file back.
+          #
+          # The measurement that makes the 404 mean something is phase 2: with
+          # .htaccess removed the same URL must serve 200 and the file's own
+          # body. Without that, "404 for a present file" is indistinguishable
+          # from a fixture that never landed -- the same shape as asserting a
+          # mutation applied instead of asserting the construct it produced.
+
+          IMG="httpd:2.4"
+
+          if ! command -v docker >/dev/null 2>&1; then
+            echo "FAIL(host): docker is not available, so this arm cannot run"
+            echo "            a check that cannot run must not report success"
+            exit 1
+          fi
+
+          HT_B64="$(base64 -w0 site/.htaccess 2>/dev/null || base64 site/.htaccess | tr -d '\n')"
+
+          out="$(docker run --rm -e HT_B64="$HT_B64" "$IMG" bash -c '
+          set -e
+          D=/usr/local/apache2/htdocs
+          printf "%s" "$HT_B64" | base64 -d > "$D/.htaccess"
+          printf "REAL-SITE-BODY\n" > "$D/index.html"
+
+          # The leak, reconstructed. Same path that was live on this domain.
+          mkdir -p "$D/.git"
+          printf "PRESENT-GIT-CONFIG-BODY\n" > "$D/.git/config"
+          printf "PRESENT-DOTFILE-BODY\n"    > "$D/.gitignore"
+
+          sed -i "s/^#LoadModule rewrite_module/LoadModule rewrite_module/" /usr/local/apache2/conf/httpd.conf
+          sed -i "s#AllowOverride None#AllowOverride All#" /usr/local/apache2/conf/httpd.conf
+          httpd -k start
+          sleep 2
+          echo "MODRW $(httpd -M 2>/dev/null | grep -c rewrite || true)"
+
+          probe() {
+            exec 3<>/dev/tcp/127.0.0.1/80
+            printf "GET /%s HTTP/1.1\r\nHost: degra.af\r\nConnection: close\r\n\r\n" "$2" >&3
+            r=$(cat <&3); exec 3<&-
+            c=$(printf "%s" "$r" | head -1 | awk "{print \$2}")
+            m=no
+            if printf "%s" "$r" | grep -q "PRESENT-GIT-CONFIG-BODY"; then m=yes; fi
+            echo "RESULT|$1|$2|$c|$m"
+          }
+
+          # Phase 1: shipped .htaccess in place. The files exist.
+          probe P1 ".git/config"
+          probe P1 ".gitignore"
+          probe P1 ".absent-canary-xyz"
+          probe P1 ""
+
+          # Phase 2: the rule removed. Same files, same request. This is the
+          # control that proves phase 1 measured a denial and not an absence.
+          rm -f "$D/.htaccess"
+          httpd -k restart
+          sleep 2
+          probe P2 ".git/config"
+          ' 2>&1)" || true
+
+          rc=0
+          get() { printf '%s' "$out" | grep "^RESULT|$1|$2|" | cut -d"|" -f4; }
+          mark() { printf '%s' "$out" | grep "^RESULT|$1|$2|" | cut -d"|" -f5; }
+
+          # --- instrument checks, before any conclusion is drawn -------------
+          if ! printf '%s' "$out" | grep -q '^MODRW [1-9]'; then
+            echo "FAIL(host): mod_rewrite was not loaded in the test container"
+            echo "            the dotfile rule is a RewriteRule, so it would not"
+            echo "            have run and every denial below would be fake"
+            printf '%s\n' "$out" | sed 's/^/            /'
+            exit 1
+          fi
+
+          idx="$(get P1 "")"
+          if [ "$idx" != "200" ]; then
+            echo "FAIL(host): index control did not serve 200 (got '${idx:-nothing}')"
+            echo "            .htaccess may not have been read at all"
+            printf '%s\n' "$out" | sed 's/^/            /'
+            exit 1
+          fi
+
+          p2="$(get P2 ".git/config")"
+          p2m="$(mark P2 ".git/config")"
+          if [ "$p2" != "200" ] || [ "$p2m" != "yes" ]; then
+            echo "FAIL(host): with .htaccess removed, /.git/config did not serve"
+            echo "            its own body (code '${p2:-nothing}', body marker '${p2m:-nothing}')."
+            echo "            The fixture never landed, so phase 1 proves nothing:"
+            echo "            a 404 for a file that was never created is not a denial."
+            printf '%s\n' "$out" | sed 's/^/            /'
+            exit 1
+          fi
+          echo "ok   instrument: /.git/config IS present and servable (P2 200, own body)"
+
+          # --- the property ---------------------------------------------------
+          for f in ".git/config" ".gitignore"; do
+            c="$(get P1 "$f")"
+            m="$(mark P1 "$f")"
+            if [ "$c" = "200" ] || [ "$m" = "yes" ]; then
+              echo "FAIL: /$f is PRESENT and .htaccess served it (code '$c', body leaked '$m')."
+              echo "      This is the state that published a deploy credential."
+              rc=1
+            else
+              echo "ok   /$f present on disk, denied by .htaccess (code $c, body not leaked)"
+            fi
+          done
+
+          # --- what this says about the live probe ----------------------------
+          # Recorded, not asserted as a preference: the point is that these two
+          # are equal, which is exactly why the external probe cannot tell them
+          # apart. If a future change made them differ, that would be worth
+          # knowing, so it is printed either way.
+          present="$(get P1 ".git/config")"
+          absent="$(get P1 ".absent-canary-xyz")"
+          echo "note present-dotfile -> $present   absent-dotfile -> $absent"
+          if [ "$present" = "$absent" ]; then
+            echo "note identical, so 'curl https://degra.af/.git/config -> 404' has NO"
+            echo "     power to detect a re-published checkout. The instruments that do"
+            echo "     are this arm, the rsync source allowlist, and the deploy log."
+          fi
+
+          if [ "$rc" -ne 0 ]; then
+            echo
+            echo "full table:"
+            printf '%s\n' "$out" | grep '^RESULT' | sed 's/^/  /'
+          fi
+
+          exit "$rc"
+
   mutation-matrix:
     runs-on: ubuntu-latest
     steps:
