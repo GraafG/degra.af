@@ -49,6 +49,28 @@ Header set X-Content-Type-Options "nosniff"
 Header set X-Frame-Options "SAMEORIGIN"
 Header set X-XSS-Protection "1; mode=block"
 
+# RFC 9116 section 3 requires security.txt to be served as
+# "text/plain; charset=utf-8". Apache's mime.types maps .txt to a bare
+# text/plain with no charset, so the charset has to be set explicitly.
+#
+# Not a live defect today: the file is 231 bytes of pure ASCII (highest byte
+# value 121), which decodes identically under UTF-8 and under any charset a
+# client would otherwise assume. This closes a conformance gap and makes the
+# encoding explicit before a future non-ASCII byte -- an accented name in a
+# Contact line, say -- starts depending on the client's guess.
+#
+# Double quotes match every other quoted argument in this file. A single-quoted
+# argument was measured against Apache 2.4.68 and also works, so this is
+# consistency rather than correctness -- and the CI gate deliberately does not
+# assert quote style, since a gate that goes red on a working configuration is
+# worse than no gate.
+#
+# <Files> matches on basename in this directory and below, which is what
+# reaches .well-known/security.txt from the docroot .htaccess.
+<Files "security.txt">
+  ForceType "text/plain; charset=utf-8"
+</Files>
+
 # Deny access to dotfiles and directories (except .well-known)
 <IfModule mod_rewrite.c>
   RewriteEngine On
