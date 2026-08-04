@@ -203,19 +203,37 @@ findings="$(
 
       if (ldname == "header") {
         # Header [condition] [always|onsuccess] <action> <header> [value]
-        # Only the Content-Type header matters here; no other header is any of
-        # this business. Measured on httpd:2.4 with mod_headers loaded: a
-        # top-level "Header set Content-Type" retypes robots.txt exactly as
-        # AddType does, and "Header always set" behaves identically. This is
-        # not a MIME directive, so a check built around AddType and ForceType
-        # alone walks straight past it.
+        #
+        # Only the Content-Type header matters here, and only the actions that
+        # actually change it. mod_headers special-cases Content-Type: some
+        # actions reach r->content_type and some only touch the headers table,
+        # which the core then overwrites. Guessing which is which is how this
+        # clause was wrong on first writing -- it matched every action, and
+        # three of them are harmless. Measured on httpd:2.4, mod_headers
+        # loaded, negative control (no .htaccess) first showing bare
+        # text/plain:
+        #
+        #   Header set        Content-Type  -> text/plain; charset=utf-8  CHANGED
+        #   Header always set Content-Type  -> text/plain; charset=utf-8  CHANGED
+        #   Header edit       Content-Type  -> text/html                 CHANGED
+        #   Header setifempty Content-Type  -> text/plain; charset=utf-8  CHANGED
+        #   Header unset      Content-Type  -> no Content-Type at all    CHANGED
+        #   Header add        Content-Type  -> text/plain                unchanged
+        #   Header append     Content-Type  -> text/plain                unchanged
+        #   Header merge      Content-Type  -> text/plain                unchanged
+        #
+        # add/append/merge are therefore NOT findings. Gating them would be an
+        # over-strict arm that is red on a working file, and the only reason
+        # this is known is that the rows were run rather than reasoned about.
+        # Each of the six is pinned as a case in the self-test.
         n = split(rest, f, /[ \t]+/)
         act = ""; hdr = ""
         for (i = 1; i <= n; i++) {
           w = tolower(unquote(f[i]))
           if (w == "always" || w == "onsuccess" || w == "early") continue
           if (act == "") {
-            if (w ~ /^(set|add|append|merge|edit|edit\*|setifempty|unset)$/) { act = w; continue }
+            if (w ~ /^(set|unset|edit|edit\*|setifempty)$/) { act = w; continue }
+            if (w ~ /^(add|append|merge)$/) next    # measured harmless
             continue    # an env=... / expr=... condition
           }
           hdr = w
