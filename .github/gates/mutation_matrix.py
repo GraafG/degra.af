@@ -64,6 +64,7 @@ STEP_REWRITE = "mod_rewrite must be enabled in the top-level context"
 STEP_SECTXT = "security.txt must be served as text/plain with charset=utf-8"
 STEP_SCOPE = "security.txt content-type must not leak onto other .txt files"
 STEP_DEPLOY = "deploy must not publish .git or .github"
+STEP_HOST = "www must redirect to the apex, and only for the apex host"
 
 # Each step mutates exactly one real artefact. Every distinct target is saved
 # and restored byte-for-byte, and the workflow re-checks .htaccess afterwards.
@@ -73,6 +74,7 @@ TARGETS = {
     STEP_SECTXT: HTACCESS,
     STEP_SCOPE: HTACCESS,
     STEP_DEPLOY: DEPLOY_WF,
+    STEP_HOST: HTACCESS,
 }
 
 TOP = "RewriteEngine On"
@@ -97,6 +99,21 @@ M_NO_DELEXCL = "FAIL: the deploy rsync excludes .git but does not use --delete-e
 OK_PERSIST = "ok: deploy checkout sets persist-credentials: false"
 OK_EXCLUDE = "ok: rsync excludes .git and .github"
 OK_DELEXCL = "ok: rsync uses --delete-excluded, so an already-published .git is removed"
+
+# The canonical-host arm asserts behaviour under a real Apache, so its markers
+# name the failing ROW of the table rather than a property of the regex. The
+# two mutations that matter -- dropping the trailing $ and dropping the port
+# group -- fail on different rows, which is the whole point: a probe that only
+# checked ":8443 redirects" cannot tell them apart, and that is how the missing
+# anchor survived in production.
+CANON = r"RewriteCond %{HTTP_HOST} ^www\.degra\.af(:[0-9]+)?$ [NC]"
+M_HOST_UNANCHORED = "FAIL(host): Host:www.degra.af.evil.example / was redirected"
+M_HOST_NOPORT = "FAIL(host): Host:www.degra.af:8443 / should 301 to the apex"
+M_HOST_NOREDIR = "FAIL(host): Host:www.degra.af / should 301 to the apex"
+M_HOST_NOCASE = "FAIL(host): Host:WWW.DEGRA.AF / should 301 to the apex"
+M_HOST_OPEN = "FAIL(host): Host:www.degra.af / redirected to"
+M_HOST_DEAD = "FAIL(host): mod_rewrite was not loaded in the test container"
+OK_HOST = "ok   Host:www.degra.af.evil.example / -> 200 (not redirected)"
 
 
 def drop_top_level(text: str) -> str:
@@ -242,6 +259,45 @@ MATRIX = [
      lambda t: t.replace("rsync -avz --delete --delete-excluded \\",
                          "# rsync would use --delete-excluded here\n          rsync -avz --delete \\"),
      False, M_NO_DELEXCL),
+
+    # --- canonical host, asserted behaviourally -------------------------
+    (STEP_HOST, "POSITIVE CONTROL: tree as shipped", lambda t: t, True, OK_HOST),
+    # The defect this arm was built for: an unanchored prefix match, so any
+    # Host beginning with the www host is answered with a 301.
+    (STEP_HOST, "the shipped bug: trailing $ and port group both removed",
+     lambda t: t.replace(CANON, r"RewriteCond %{HTTP_HOST} ^www\.degra\.af [NC]"),
+     False, M_HOST_UNANCHORED),
+    (STEP_HOST, "trailing $ removed, port group kept",
+     lambda t: t.replace(CANON, r"RewriteCond %{HTTP_HOST} ^www\.degra\.af(:[0-9]+)? [NC]"),
+     False, M_HOST_UNANCHORED),
+    # Fails on a DIFFERENT row from the two above. That separation is the
+    # property a ":8443 redirects" probe could not provide.
+    (STEP_HOST, "port group removed, trailing $ kept",
+     lambda t: t.replace(CANON, r"RewriteCond %{HTTP_HOST} ^www\.degra\.af$ [NC]"),
+     False, M_HOST_NOPORT),
+    (STEP_HOST, "[NC] removed (www host in upper case stops matching)",
+     lambda t: t.replace(CANON, r"RewriteCond %{HTTP_HOST} ^www\.degra\.af(:[0-9]+)?$"),
+     False, M_HOST_NOCASE),
+    (STEP_HOST, "whole redirect removed (www stops being canonicalised)",
+     lambda t: t.replace(CANON + "\n", "").replace(
+         "RewriteRule ^(.*)$ https://degra.af/$1 [R=301,L]\n", "", 1),
+     False, M_HOST_NOREDIR),
+    # Strictly worse than the bug being fixed: reflecting the request host
+    # into the target turns a canonical redirect into an open redirect.
+    (STEP_HOST, "redirect target reflects the request host (open redirect)",
+     lambda t: t.replace("RewriteRule ^(.*)$ https://degra.af/$1 [R=301,L]",
+                         "RewriteRule ^(.*)$ https://%{HTTP_HOST}/$1 [R=301,L]"),
+     False, M_HOST_OPEN),
+    # Must stay green. The arm asserts the property, not the spelling: an
+    # equivalent regex is a legal refactor and gating text would reject it.
+    # This is the control that a pattern-matching checker would fail, and
+    # the reason this arm simulates rather than greps.
+    (STEP_HOST, r"GREEN: same property spelled (:\d+)?$ instead of (:[0-9]+)?$",
+     lambda t: t.replace(CANON, r"RewriteCond %{HTTP_HOST} ^www\.degra\.af(:\d+)?$ [NC]"),
+     True, OK_HOST),
+    (STEP_HOST, "GREEN: unrelated comment added above the condition",
+     lambda t: t.replace(CANON, "# a maintainer's note\n" + CANON),
+     True, OK_HOST),
 ]
 
 
@@ -263,7 +319,19 @@ def main() -> int:
     saved_bytes = {p: p.read_bytes() for p in targets}
     saved_text = {p: b.decode("utf-8").replace("\r\n", "\n") for p, b in saved_bytes.items()}
 
-    steps = (STEP_REWRITE, STEP_SECTXT, STEP_SCOPE, STEP_DEPLOY)
+    # Derive the step list from TARGETS rather than repeating it. This was a
+    # hardcoded tuple, and adding a fifth arm to MATRIX without editing it here
+    # raised a KeyError deep in the run -- a parallel list that has to be kept
+    # in sync by hand is one more thing that fails silently in the direction of
+    # doing less work. The assertion below closes the other direction.
+    unknown = {step for step, *_ in MATRIX} - set(TARGETS)
+    if unknown:
+        raise SystemExit(
+            "FATAL: MATRIX references steps with no entry in TARGETS: "
+            + ", ".join(sorted(unknown))
+            + ". Those cases would never run, and the matrix would report a "
+              "smaller suite as fully passing.")
+    steps = tuple(TARGETS)
     scripts = {}
     print(f"bash: {BASH}")
     for index, step in enumerate(steps):
