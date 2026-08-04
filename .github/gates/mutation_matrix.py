@@ -168,6 +168,20 @@ MATRIX = [
     (STEP_SCOPE, "GREEN: unrelated <Files> block with no content-type directive",
      lambda t: t + '\n<Files "favicon.ico">\n  Header set Cache-Control "max-age=604800"\n</Files>\n',
      True, OK_SCOPED),
+    # Must stay green. This is the legal configuration the arm used to reject:
+    # AddType inside the narrow container. Measured on Apache 2.4.68 with a
+    # negative control first -- security.txt gets charset=utf-8 while robots.txt
+    # and pgp.txt stay bare text/plain, so <Files> does scope AddType. The row
+    # carries its own positive control: if <Files> were ignored wholesale,
+    # security.txt would be bare too.
+    #
+    # It is paired deliberately with "AddType on .txt", which must stay RED. If
+    # a future narrowing of this arm turns this case green by also quietening
+    # that one, the narrowing is wrong and the pair is what says so.
+    (STEP_SCOPE, "GREEN: AddType inside <Files security.txt> (legal -- measured, must not be gated)",
+     lambda t: t.replace(FILES_BLOCK,
+                         '<Files "security.txt">\n  AddType "text/plain; charset=utf-8" .txt\n</Files>\n'),
+     True, OK_SCOPED),
 ]
 
 

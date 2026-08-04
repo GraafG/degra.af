@@ -262,6 +262,35 @@ jobs:
           # tidy. It asserts that no content-type-setting directive applies more
           # broadly than that one file: nothing at the top level, and nothing in
           # a container whose pattern is wider than the file it is meant for.
+          #
+          # Corrected after this arm rejected a legal configuration. It used to
+          # flag AddType even inside <Files "security.txt">, reasoning that
+          # AddType maps an extension rather than a file. The premise is true and
+          # the conclusion does not follow: <Files> restricts which *requests* a
+          # directive applies to, which is independent of whether the directive
+          # maps an extension. Measured on Apache 2.4.68, with a negative control
+          # first so the instrument was proven before it was believed:
+          #
+          #   AllowOverride None    security.txt text/plain
+          #                         robots.txt   text/plain    (.htaccess ignored)
+          #   A top-level AddType   security.txt text/plain; charset=utf-8
+          #                         robots.txt   text/plain; charset=utf-8  RETYPED
+          #                         pgp.txt      text/plain; charset=utf-8  RETYPED
+          #   B AddType in <Files>  security.txt text/plain; charset=utf-8
+          #                         robots.txt   text/plain    NOT retyped
+          #                         pgp.txt      text/plain    NOT retyped
+          #   C ForceType in <Files> identical to B             (what ships)
+          #
+          # Row B carries its own positive control: if <Files> were being ignored
+          # wholesale, security.txt would be bare too. It is not -- the directive
+          # fired AND was scoped. So A stays gated and B is legal.
+          #
+          # The failure this arm had is the flattering one. An over-strict gate is
+          # red on things it should not be, so its 18 red arms read as thoroughness
+          # while it quietly narrowed what Apache permits. None of the green
+          # controls covered a legal AddType, because the arm and its fixtures were
+          # written by the same author holding the same wrong belief -- a green
+          # control only defends the legality somebody thought to write down.
 
           scan="$(awk '
             { line = $0; sub(/^[ \t]*#.*$/, "", line); l = tolower(line) }
@@ -280,9 +309,9 @@ jobs:
             l ~ /^[ \t]*(forcetype|defaulttype)[ \t]/ ||
             l ~ /^[ \t]*addtype[ \t]/ ||
             l ~ /^[ \t]*header[ \t]+(always[ \t]+)?set[ \t]+content-type[ \t]/ {
-              # AddType is a mapping directive: even inside the narrow
-              # container it applies to an extension, not to the one file.
-              if (narrow && l !~ /^[ \t]*addtype[ \t]/) next
+              # Inside <Files "security.txt"> the request set is already the one
+              # file, whatever the directive maps. Measured, not inferred.
+              if (narrow) next
               bad = bad (bad ? " | " : "") $0
               sub(/^[ \t]+/, "", bad)
             }
