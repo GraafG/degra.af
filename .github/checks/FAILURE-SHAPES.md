@@ -59,6 +59,25 @@ every fixture exit `127` -- exit-code-only scoring would have reported five
 working arms. The `#15` host arms, which refuse to run at all without docker
 rather than skipping green.
 
+**And the forced-red battery for the expiry arm, in the PR that added this
+paragraph.** It resolved the repo root by walking `__file__` upward looking for
+`.git`, but the battery lives outside the repo, so it ran off the drive root --
+where `C:\`'s parent is `C:\` -- and spun for **16 minutes producing no output at
+all**. It never reached a single assertion. A probe that cannot locate its
+subject must fail loudly rather than search harder, and "no output yet" is
+indistinguishable from "working" for exactly as long as you are willing to wait.
+
+**Measured, the version that matters most,** on the expiry suite:
+
+```
+checker CLI replaced by a silent `return 0`  ->  rc=1
+    GUARD FIRED: layer C recorded no passing GREEN row
+```
+
+An exit-code-only scorer reads that mutation as a clean pass. It is caught only
+because green rows are scored on the checker's **own** `ok` markers and each
+layer must show both polarities.
+
 **Tell.** The arm's verdict is derived only from an exit code, with no assertion
 that the expected work happened.
 
@@ -67,6 +86,15 @@ that the expected work happened.
 **Rule.** *A check that cannot run must not report success.* Score on a marker
 string in the output as well as the exit code, and require at least one GREEN
 case per step so a suite that is red for an environmental reason cannot pass.
+
+**Sharpening, earned twice in one session.** *If the meta-control and the arm can
+both be satisfied by the same failure, the meta-control is not independent of the
+arm.* Both times, the fault introduced was **upstream of every case**, so every
+red agreed with every other red -- which reads as thorough coverage and is
+actually a single common cause. **When every red suddenly agrees, suspect a
+common cause rather than thoroughness.** The practical form: a green control that
+lives in the same process, reads the same file and runs the same interpreter as
+the reds is not a control over any of those three things.
 
 **Measured against the allowlist arm** -- artefact deleted out from under it:
 
@@ -168,7 +196,29 @@ reads as thoroughness.
 
 **Instances.** Ten green controls, none covering a legal `AddType` inside
 `<Files>`; the defect was found only because two independent implementations
-disagreed. **And the allowlist arm in this very PR** -- see below.
+disagreed. The allowlist arm's four rsync source spellings -- see below. **And
+the security.txt expiry checker, on the day it was ported**: its RFC 3339 pattern
+required an upper-case `T` and `Z`, but RFC 3339 s5.6 explicitly permits the
+lower-case forms, so a legal `Expires: 2027-08-03t00:00:00.000z` came back
+`unparseable`. Measured, not reasoned about:
+
+```
+lowercase t and z (RFC 3339 s5.6 permits)   rc=1  unparseable   <== red on working
+lowercase z only                            rc=1  unparseable   <== red on working
++00:00 instead of Z                         rc=0  ok
+-00:00 (unknown local offset)               rc=0  ok
+six-digit fractional seconds                rc=0  ok
+leap second 23:59:60Z                       rc=1  unparseable   <== legal, still refused
+CONTROL: the committed value                rc=0  ok
+```
+
+Three things about that table are the point. It was produced by **enumerating the
+corpus before trusting the arm**, which is this shape's fixture. The bug was
+**inherited from a reference implementation that had already been reviewed** --
+porting copies the author's model along with the code. And the leap-second row is
+a legal value still refused, recorded as a **stated refusal with a pinned test**
+rather than quietly dropped, because the alternative is that it is rediscovered
+as a mystery.
 
 **Tell.** The arm decides by enumerating the answers the author could think of.
 
@@ -262,3 +312,146 @@ leaves you believing the code does something you have not checked.
 only instrument is to derive the arm's behaviour from *measurement* -- the
 spelling table in shape 6 -- rather than from reading the file. Treat a
 confident comment as an unverified claim, and check the load-bearing one.
+
+---
+
+## 9. A gate that fires on change cannot defend a property that decays without one
+
+Every other shape in this catalogue is about a gate reading the wrong answer.
+This one is about a gate that is never asked. The property is correct at every
+instant CI runs, and wrong in between.
+
+**Instance.** free4me's `security.txt` carried `Expires: 2026-06-22T12:00:00.000Z`
+-- an exact, correct one-year window, authored 2025-06-22. It was never renewed
+and sat **44 days past its `Expires`**, formally void under RFC 9116 s2.5.5, with
+**every gate in the estate green throughout** -- correctly, because every one of
+them asserts the file is *served* (present, right content-type, right charset)
+and none asserts it is still *valid*.
+
+This repo's is `Expires: 2027-08-03T00:00:00.000Z`, healthy, and until this PR
+nothing here would have noticed if it stopped being.
+
+**Tell.** The property depends on **the clock, or on a third party**, rather than
+on the repository's bytes. If you can make the gate wrong without making a
+commit, a commit-triggered gate is the wrong instrument.
+
+**Fixture.** Advance the clock past the deadline and require a red. Note that
+this is a fixture no `pull_request` trigger can perform on itself -- which is the
+shape restated.
+
+**Note what this implies about the obvious fix.** An arm asserting "`Expires` is
+in the future at build time" would have been GREEN the day that value was
+committed and green for the next 365 days. It would never have caught this. Two
+things close the hole and they must travel together:
+
+1. a **margin**, not a deadline -- otherwise you get a green build on day 29 and
+   a void file on day 31, with no commit in between;
+2. an instrument that runs **with no commit** -- a `schedule:`d workflow.
+
+**Measured, this repo, at the point of adding the arm** (`checkExpiry` against
+the committed file, only the injected instant moving -- the bytes are untouched,
+which is exactly how it decays in production):
+
+```
+this repo's committed value is valid today   (2027-08-03T00:00:00.000Z, 363d)
+clock advanced 1 day past its deadline       code=expired    RED
+clock advanced to 29d remaining              code=expiring   RED while still valid
+clock advanced to 31d remaining              code=valid      green
+```
+
+**Remedy, as shipped.** `.github/workflows/securitytxt-validity.yml` on a daily
+`schedule:`, checking the **live origin** rather than the repo, with a 30-day
+margin, no `npm ci`, and failing closed on every way of not obtaining the file.
+Four properties, each load-bearing:
+
+- **live origin** -- a renewed value that never deployed is not a renewed file on
+  the internet, and this repo has shipped a deploy whose published and committed
+  states disagreed;
+- **margin, not deadline** -- red for a month while the file is still valid, so
+  the alarm has somewhere to be answered;
+- **no `npm ci`** -- a daily job with dependencies acquires a daily failure mode
+  unrelated to what it measures, and a flaky daily red is a red that gets muted;
+- **fails closed** -- 404, connection-refused, an HTML body and a missing file
+  are each red with their own distinct reason, and an `Expires:` inside a
+  **comment** does not satisfy the parse.
+
+**And: a scheduled workflow that has never run is an unverified premise.**
+Trigger it once by `workflow_dispatch` after merging. Everything above is a claim
+about a file that has never executed until that happens.
+
+---
+
+## 10. Destructive fixture teardown
+
+The harness cleans up by deleting, and deletes something it did not create. Row
+order then determines the result, and the harness reports its own damage as a
+property of the subject.
+
+**Instances.** A `Remove-Item -Recurse` teardown that destroyed **pre-existing**
+build output later rows depended on -- producing a table that contradicted a
+correct PR. `dist-invariance.mjs`'s `reset --hard`. Both are shape 3 (the probe
+writes where the target overwrites) seen from the cleanup end rather than the
+measurement end.
+
+**Tell.** Teardown is expressed as *remove* or *revert*, rather than as *restore
+what was there*. Or: the harness cannot state what the subject looked like before
+it started, because it never recorded it.
+
+**Fixture.** Run the suite twice in one working tree, and run its rows in a
+different order. A harness with this defect gives different answers.
+
+**Remedy.** `mutation_matrix.py` and `test-securitytxt-expiry.mjs` both embody
+it: snapshot **into memory before the first edit**, restore from that snapshot,
+verify the restore by hash, and re-verify at exit independently of the per-row
+check. **Never `git checkout`** -- restoring from git launders the harness's own
+damage and comes back clean whether or not the harness understood what it did.
+And snapshot **only the files the harness actually mutates**: restoring a file
+you never modified is not caution, it is a way to overwrite someone else's state
+with a stale copy.
+
+```
+restored byte-for-byte from the in-memory originals: .htaccess, deploy-directadmin.yml
+all 57 cases behaved as required (36 red, 21 green)
+```
+
+---
+
+## 11. Contaminated fixture content
+
+A fixture that tests something other than what its label claims. The verdict is
+*correct* -- and it is a correct verdict about the wrong subject, which is
+strictly worse than a wrong one, because it survives being checked.
+
+**Instance.** A row meant to be a clean `<Files "security.txt"> AddType` control
+had a real `<Files "robots.txt"> ForceType text/plain` block pasted into it. That
+directive genuinely does retype `robots.txt`, so the checker was right to reject
+it -- but the red looked **exactly like** an over-strictness regression that had
+already happened once in this repo, on `main`. A regression report against `main`
+was one step away, with a confident measurement behind it.
+
+**Tell.** A red that confirms something you already expected. Expectation is when
+fixtures get least scrutiny, and a contaminated fixture is most persuasive
+precisely when it agrees with you.
+
+**Fixture.** Assert the fixture's content positively before scoring the row --
+the INERT FIXTURE checks in `mutation_matrix.py` and `test-securitytxt-expiry.mjs`
+are this, generalised: a row that cannot demonstrate it produced the construct it
+is named for fails the *harness*, not the case.
+
+**Remedy, and the part worth keeping.** What made this diagnosable was that the
+checker **named the offending line**:
+
+```
+/tmp/rowB_contaminated:6: ForceType text/plain
+    -> ForceType applies in a scope that reaches robots.txt
+```
+
+Line 6 was the contamination. **A bare `exit 1` would have shipped the false
+report.** Naming the offending `file:line` is not ergonomics -- it is what makes
+a red *falsifiable by its reader*. It is the difference between "the gate says
+no" and "the gate says no **because of this line**", and only the second can be
+checked against what the reader believes they tested.
+
+**Open in this repo.** Several arms print the rule they enforce but not the line
+that violated it. That is tracked and not yet done; it is separate work from any
+one gate.

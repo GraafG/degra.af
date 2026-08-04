@@ -639,3 +639,37 @@ jobs:
 
       - name: Negative-test the robots-txt-not-retyped check
         run: bash .github/checks/htaccess-content-type-scope.selftest.sh
+
+  # security.txt expiry is deliberately NOT a step in `validate`, and not in the
+  # mutation matrix either. Both of those are instruments for properties that
+  # break when someone edits a file. This property breaks on a date, with no
+  # commit, so its real instrument is .github/workflows/securitytxt-validity.yml
+  # on a schedule. FAILURE-SHAPES.md #9.
+  #
+  # What the PR-time arm below is FOR is the different and narrower class the
+  # scheduled job cannot catch quickly: a value typed into the past, or into a
+  # spelling no RFC 9116 consumer can read, arriving in a pull request. It is
+  # worth having and it is not the control that closes the hole. Saying so here
+  # matters, because an arm whose scope is misremembered is an arm someone later
+  # deletes the scheduled job on the strength of.
+  securitytxt-expiry:
+    name: security.txt Expires is valid, and the checker fires
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      # No npm ci: the checker has no dependencies.
+      - name: The committed security.txt is not expired or expiring
+        run: node .github/checks/securitytxt-expiry.mjs --file site/.well-known/security.txt
+
+      # And the arm above must be capable of going red. This mutates the file,
+      # requires a specific marker per red row, restores from an in-memory
+      # snapshot, and fails if either polarity is missing from either layer.
+      - name: Negative-test the expiry checker
+        run: node .github/checks/test-securitytxt-expiry.mjs
