@@ -5,7 +5,45 @@ RewriteCond %{HTTP_HOST} ^www\.degra\.af [NC]
 RewriteRule ^(.*)$ https://degra.af/$1 [R=301,L]
 
 # Security headers
-Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+#
+# HSTS: the `preload` directive is deliberately OMITTED. Do not re-add it.
+#
+# Removing `preload` is NOT a security downgrade. max-age=31536000 and
+# includeSubDomains are unchanged, so every browser still enforces HTTPS for
+# this domain and all subdomains for a full year after any visit. The only
+# thing `preload` adds is *consent to be submitted* to the Chrome HSTS preload
+# list, which ships baked into browsers.
+#
+# That consent is not ours to leave lying around. Submission is not restricted
+# to the domain owner: anyone may submit a domain whose header advertises
+# `preload`, and hstspreload.org accepts it if the site is otherwise eligible.
+# This site is otherwise eligible (2026-08-04: the preloadable API returned
+# zero errors and zero warnings), so keeping the token is a standing, open
+# invitation for a stranger to commit us to something we never decided.
+#
+# The commitment is effectively irreversible and covers subdomains we have not
+# created yet. Preload + includeSubDomains means every present and future
+# subdomain MUST serve valid HTTPS in browsers shipping the list, with no way
+# to exempt one and no fast off switch. A staging host, a mail interface, or a
+# third-party tool on a CNAME that later needs plain HTTP becomes unreachable,
+# not merely insecure.
+#
+# We have already paid this bill once. The sibling domain geertdegraaf.nl,
+# owned by the same person, was preloaded and then had to be taken off:
+#
+#   $ curl -s "https://hstspreload.org/api/v2/status?domain=geertdegraaf.nl"
+#   { "name": "geertdegraaf.nl", "status": "removed", ... }
+#
+#   $ curl -s "https://hstspreload.org/api/v2/preloadable?domain=geertdegraaf.nl"
+#   { "errors": [ { "code": "header.preloadable.preload.missing", ... } ] }
+#
+# Removal is slow and has to wait for browser releases to roll over. That
+# domain now keeps itself off the list purely by omitting this one token, and
+# the API confirms the missing token is the only thing doing it.
+#
+# A CI gate in .github/workflows/pr-open.yml asserts this line keeps max-age,
+# keeps includeSubDomains, and stays free of `preload`.
+Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
 Header set Content-Security-Policy "default-src 'self'; img-src 'self' https: data:; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; connect-src 'self';"
 Header set X-Content-Type-Options "nosniff"
 Header set X-Frame-Options "SAMEORIGIN"

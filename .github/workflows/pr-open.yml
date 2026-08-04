@@ -13,3 +13,51 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+
+      - name: HSTS header must not advertise preload consent
+        run: |
+          set -euo pipefail
+
+          # Inspect only the live directive, never the surrounding comments
+          # (which mention `preload` by name while explaining its absence).
+          line="$(grep -E '^[[:space:]]*Header[[:space:]]+always[[:space:]]+set[[:space:]]+Strict-Transport-Security' .htaccess || true)"
+
+          if [ -z "$line" ]; then
+            echo "FAIL: no 'Header always set Strict-Transport-Security' directive in .htaccess"
+            exit 1
+          fi
+
+          count="$(printf '%s\n' "$line" | wc -l)"
+          if [ "$count" -ne 1 ]; then
+            echo "FAIL: expected exactly 1 Strict-Transport-Security directive, found $count"
+            printf '%s\n' "$line"
+            exit 1
+          fi
+
+          echo "directive: $line"
+          rc=0
+
+          case "$line" in
+            *max-age=31536000*) echo "ok: max-age=31536000 present" ;;
+            *) echo "FAIL: max-age=31536000 missing or changed"; rc=1 ;;
+          esac
+
+          case "$line" in
+            *includeSubDomains*) echo "ok: includeSubDomains present" ;;
+            *) echo "FAIL: includeSubDomains missing"; rc=1 ;;
+          esac
+
+          case "$line" in
+            *preload*)
+              echo "FAIL: 'preload' directive present in the HSTS header."
+              echo "      This is a consent flag: anyone may submit an eligible domain"
+              echo "      advertising it to the Chrome HSTS preload list, and removal is"
+              echo "      slow. Sibling domain geertdegraaf.nl is already status=removed."
+              echo "      Dropping it is not a downgrade - max-age and includeSubDomains"
+              echo "      still enforce HTTPS. See the comment block in .htaccess."
+              rc=1
+              ;;
+            *) echo "ok: 'preload' absent" ;;
+          esac
+
+          exit "$rc"
