@@ -95,6 +95,24 @@ jobs:
           # Red on a working file is the expensive failure: it teaches people to
           # edit the gate, so it gets deleted rather than debugged, costing the
           # coverage it was added to provide.
+          #
+          # Why this is modelled as STATE and not as a line being present:
+          # a presence check reads `RewriteEngine On` followed later by
+          # `RewriteEngine Off` as fine. Tracking the value through the parse
+          # makes catching that automatic rather than a second clause somebody
+          # has to remember to implement -- and it is the clause most likely to
+          # be dropped, because the first half is the one that reads like the
+          # requirement.
+          #
+          # Why the state model tracks <IfModule> scope rather than being flat:
+          # a flat last-value-wins model is NOT a safe simplification for this
+          # file. .htaccess sets the directive twice, and the second one lives
+          # inside <IfModule mod_rewrite.c>. Delete the top-level directive --
+          # exactly the copy-propagation mutation this gate exists to catch --
+          # and a flat model still reports effective=on from the nested one and
+          # passes, while the www -> apex rule at the top level is inert.
+          # Verified against this file: the flat model returns PASS on that
+          # mutation, the scoped model below returns FAIL.
 
           # Resolve the effective TOP-LEVEL setting the way httpd does: track
           # container nesting, ignore anything inside a <Section>, and let the
