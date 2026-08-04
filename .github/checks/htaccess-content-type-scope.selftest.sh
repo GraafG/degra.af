@@ -199,6 +199,23 @@ green_case() {
 # three red cases and one green case all reported wrongly until this helper
 # existed. Landing a mutation and landing the INTENDED mutation are different
 # properties, and only the second one proves anything.
+#
+# Treat this as a class, not an incident. Line-ending and terminator details
+# have now invalidated a check twice in this repository, and they share a
+# shape: the text is edited through a byte-level channel that does not know
+# what a line is, so the result is well-formed as bytes and meaningless as
+# configuration. Two rules follow, and both are load-bearing here:
+#
+#   * never append to a file without establishing that it ends in a newline;
+#   * never write a fixture assertion whose pattern spans a newline, because
+#     "\n" matches nothing on a CRLF checkout and the assertion then passes
+#     vacuously -- the mutations below are all line-based for this reason.
+#
+# What makes this the worst failure in the suite is not that the control
+# missed the defect. It is that the control -- "assert the mutation landed" --
+# was the thing that certified the broken fixture as sound. A check that
+# cannot fail on the case it exists to catch is worse than no check, because
+# it is spent trust.
 append_directives() {
   local f="$1"; shift
   if [ -s "$f" ] && [ -n "$(tail -c 1 "$f")" ]; then
@@ -247,6 +264,26 @@ mut_header_content_type() {
 
 mut_header_always_content_type() {
   append_directives "$1" 'Header always set Content-Type "text/plain; charset=utf-8"'
+}
+
+mut_header_edit_content_type() {
+  append_directives "$1" 'Header edit Content-Type "plain" "html"'
+}
+
+mut_header_setifempty_content_type() {
+  append_directives "$1" 'Header setifempty Content-Type "text/plain; charset=utf-8"'
+}
+
+mut_header_add_content_type() {
+  append_directives "$1" 'Header add Content-Type "text/plain; charset=utf-8"'
+}
+
+mut_header_append_content_type() {
+  append_directives "$1" 'Header append Content-Type "text/plain; charset=utf-8"'
+}
+
+mut_header_merge_content_type() {
+  append_directives "$1" 'Header merge Content-Type "text/plain; charset=utf-8"'
 }
 
 # --------------------------------------------------------- green mutations
@@ -323,6 +360,15 @@ red_case "Header set Content-Type at the top level (not a MIME directive at all)
 red_case "Header always set Content-Type (the 'always' variant behaves identically)" \
   "Header set Content-Type applies in a scope that reaches robots.txt" mut_header_always_content_type
 
+# mod_headers special-cases Content-Type: some actions reach r->content_type,
+# some only touch the headers table and are then overwritten by the core. The
+# split below is measured on httpd:2.4, not derived from the directive names.
+red_case "Header edit Content-Type (rewrites the value in place: measured text/plain -> text/html)" \
+  "Header edit Content-Type applies in a scope that reaches robots.txt" mut_header_edit_content_type
+
+red_case "Header setifempty Content-Type (measured: robots.txt gains charset=utf-8)" \
+  "Header setifempty Content-Type applies in a scope that reaches robots.txt" mut_header_setifempty_content_type
+
 green_case "the checked-in .htaccess exactly as deployed"
 
 green_case "single-quoted ForceType argument (measured working on Apache 2.4.68; style is not gated)" \
@@ -336,6 +382,19 @@ green_case "AddType for an unrelated extension (.md)" \
 
 green_case "an unrelated response header (Cache-Control) - only Content-Type is this check's business" \
   mut_unrelated_header
+
+# These three are the reason this check does not simply match every Header
+# action. All were measured on httpd:2.4 leaving robots.txt at bare text/plain,
+# so gating them would make the arm red on a working file. They exist to keep a
+# future "tighten the Header clause" edit honest: it must not turn these red.
+green_case "Header add Content-Type - measured harmless, core overwrites it (robots.txt stays text/plain)" \
+  mut_header_add_content_type
+
+green_case "Header append Content-Type - measured harmless (robots.txt stays text/plain)" \
+  mut_header_append_content_type
+
+green_case "Header merge Content-Type - measured harmless (robots.txt stays text/plain)" \
+  mut_header_merge_content_type
 
 green_case "a second .txt file typed by exact name (humans.txt) - other .txt files are not robots.txt" \
   mut_other_txt_file
