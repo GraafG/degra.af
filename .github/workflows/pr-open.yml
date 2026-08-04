@@ -243,3 +243,113 @@ jobs:
           # failure that teaches people to edit gates rather than debug them.
 
           exit "$rc"
+
+      - name: security.txt content-type must not leak onto other .txt files
+        run: |
+          set -euo pipefail
+
+          # Blast radius. The intuitive way to satisfy RFC 9116 is
+          #
+          #   AddType "text/plain; charset=utf-8" .txt
+          #
+          # which is shorter and reads better than a <Files> container -- and
+          # measured against Apache 2.4.68 it also retypes robots.txt. Every
+          # other arm in this job stays green in that state, because
+          # security.txt does get the right header. The change is correct about
+          # its target and wrong about its scope.
+          #
+          # This arm is why <Files "security.txt"> is load-bearing rather than
+          # tidy. It asserts that no content-type-setting directive applies more
+          # broadly than that one file: nothing at the top level, and nothing in
+          # a container whose pattern is wider than the file it is meant for.
+
+          scan="$(awk '
+            { line = $0; sub(/^[ \t]*#.*$/, "", line); l = tolower(line) }
+
+            # Track container nesting and remember whether the container we are
+            # inside is the narrow security.txt one.
+            l ~ /^[ \t]*<files[ \t]+"?security\.txt"?[ \t]*>/ { depth++; narrow = 1; next }
+            l ~ /^[ \t]*<(files|filesmatch|directory|location|locationmatch)[ \t]/ {
+              depth++; narrow = 0; next
+            }
+            l ~ /^[ \t]*<\/(files|filesmatch|directory|location|locationmatch)[ \t]*>/ {
+              depth--; if (depth < 1) narrow = 0; next
+            }
+
+            # Directives that decide or overwrite the response content type.
+            l ~ /^[ \t]*(forcetype|defaulttype)[ \t]/ ||
+            l ~ /^[ \t]*addtype[ \t]/ ||
+            l ~ /^[ \t]*header[ \t]+(always[ \t]+)?set[ \t]+content-type[ \t]/ {
+              # AddType is a mapping directive: even inside the narrow
+              # container it applies to an extension, not to the one file.
+              if (narrow && l !~ /^[ \t]*addtype[ \t]/) next
+              bad = bad (bad ? " | " : "") $0
+              sub(/^[ \t]+/, "", bad)
+            }
+
+            END { print bad }
+          ' .htaccess)"
+
+          if [ -z "$scan" ]; then
+            echo "ok: no content-type directive reaches beyond security.txt"
+            exit 0
+          fi
+
+          echo "FAIL: a content-type directive applies beyond security.txt."
+          echo "      offending: $scan"
+          echo ""
+          echo "      Measured on Apache 2.4.68: AddType on .txt retypes"
+          echo "      robots.txt as well, and every other arm in this job stays"
+          echo "      green while it does -- security.txt really does get the"
+          echo "      right header. Keep the directive inside"
+          echo "      <Files \"security.txt\"> so the scope matches the intent."
+          exit 1
+
+  # Separate job on purpose. It mutates .htaccess in its own checkout to prove
+  # the assertion arms above can actually fail, so it must never be able to hand
+  # a mutated tree to anything that ships.
+  #
+  # Isolation is topological, not a matter of step ordering:
+  #   * deploy lives in a different workflow file (deploy-directadmin.yml) and
+  #     triggers on push to main, so `needs:` cannot reach it from here --
+  #     needs edges exist only between jobs in the same workflow;
+  #   * this job declares no `needs:` and nothing declares `needs: mutation-matrix`;
+  #   * it uploads no artifact and pushes nothing.
+  # The final step byte-compares .htaccess against HEAD and fails if the harness
+  # left the file mutated: a harness that exits 0 having not restored is the
+  # dangerous outcome, and it must be loud rather than silent.
+  mutation-matrix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Install PyYAML
+        run: python3 -m pip install --quiet pyyaml
+
+      - name: Run the .htaccess mutation matrix
+        run: python3 .github/gates/mutation_matrix.py
+
+      - name: .htaccess must be byte-identical to HEAD after mutation
+        if: always()
+        run: |
+          set -euo pipefail
+
+          # Runs even if the matrix failed: a failing matrix is the case most
+          # likely to have exited early and left the file mutated.
+          expected="$(git rev-parse "HEAD:.htaccess")"
+          actual="$(git hash-object .htaccess)"
+
+          echo "expected blob: $expected"
+          echo "actual blob:   $actual"
+
+          if [ "$expected" != "$actual" ]; then
+            echo "::error::.htaccess was not restored after the mutation matrix."
+            echo "The working tree differs from HEAD. Nothing here reaches the"
+            echo "deploy path, but a harness that fails to restore is a defect"
+            echo "in the harness and must not pass quietly."
+            git --no-pager diff -- .htaccess || true
+            exit 1
+          fi
+
+          echo "ok: .htaccess restored byte-for-byte"
