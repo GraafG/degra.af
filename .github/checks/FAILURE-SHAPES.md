@@ -485,3 +485,183 @@ checked against what the reader believes they tested.
 **Open in this repo.** Several arms print the rule they enforce but not the line
 that violated it. That is tracked and not yet done; it is separate work from any
 one gate.
+
+---
+
+## 12. A true value about the wrong referent
+
+Not a stale number and not a wrong number. A number that is **correct about
+something you were not asking about**, quoted as though it answered the question.
+
+**Instances.** Three times tonight, by two different sessions.
+
+```
+reported   main is 863a912          -- real commit, real ancestor, four behind
+actual     main is 4efc406
+reported   head 0d57855, base 8c99d0c
+actual     head f23556e, base 05cab30
+reported   PR #12 open, awaiting a decision
+actual     #12 merged as b255311; its branch deleted; f23556e on no branch at all
+```
+
+Every one of those SHAs existed and every one described a real object. What none
+of them described was `origin/main` at the moment of speaking. A local `main` is
+a *cached answer to a question about the remote*, and it is the same shape as a
+merge-base: `git merge-base` returns a genuine commit that is genuinely an
+ancestor, and is genuinely not the tip.
+
+This is why it survives review. A wrong SHA looks wrong -- it fails to resolve,
+or `git show` errors. A stale SHA resolves, has a plausible message, has the
+right shape, and sits in the right history. Everything you would check to catch
+a fabricated value passes.
+
+**Tell.** A state claim -- what `main` is, what is open, what is merged -- made
+without a fetch immediately preceding it in the same command. Also: any use of
+`--is-ancestor` to decide whether work has landed. **`--is-ancestor` returns
+false for every squash-merged branch by construction**, so on a squash-merge repo
+it is a guaranteed false negative, and the branch it says is unmerged is often
+one whose content is fully in `main`.
+
+**Fixture.** Derive `main` from `origin/main` after an explicit `git fetch`,
+never from a local ref or a merge-base. Timestamp every state claim, in the same
+breath as the claim, so a reader can see how old it is. Audit merge state **by
+content** -- fetch the file at both refs and count lines present on the branch
+and absent from `main` -- not by ancestry.
+
+**Measured, this repo:**
+
+```
+graafg-gate-rewriteengine-on   --is-ancestor      -> false  ("unmerged")
+                               lines on branch absent from main -> 0  (fully subsumed)
+```
+
+**Rule.** *Freshness is not a property of a value. It is a property of the act
+that produced it, and it is not recoverable from the value afterwards.*
+
+---
+
+## 13. The instrument that was never armed
+
+Distinct from shape 2, and the distinction is the whole entry. In shape 2 the
+*check* could not run and its failure to run was read as a pass. Here the check
+runs perfectly, reports accurately, and the **experiment** never engaged -- so a
+true report of "no effect" is produced by a rig in which nothing could have had
+an effect.
+
+A null result is the output most vulnerable to this, because a null is what you
+get from a working experiment that found nothing *and* from an experiment that
+never happened, and the two are byte-identical.
+
+**Instances.**
+
+*mod_negotiation.* Testing whether MultiViews could retype `robots.txt`, using
+`doc.txt.en` as the competing variant. Without `AddLanguage`, `.en` is not a
+recognised extension, so MultiViews never engaged. Both rows returned 404 and it
+read cleanly as "MultiViews changes nothing" -- the correct conclusion drawn from
+a test that never ran. Caught only by requiring a positive control showing
+MultiViews *doing something* first.
+
+*The comment-line filter, found independently in two implementations.*
+`securitytxt-expiry.mjs` strips `#` lines before looking for `Expires`, and
+its self-test has a row asserting a commented-out `Expires` does not satisfy
+the gate. That row is green. It is also green with the filter **deleted**: the
+field regex is anchored with `^\s*Expires` and `#` cannot satisfy `\s*`, so
+the filter cannot change any outcome and the row that appeared to defend it
+never depended on it.
+
+This was found in one port of the checker and then measured against the other,
+written by a different session, which had arrived at the same inert filter and
+the same reassuring row:
+
+```
+#20's checker, unmutated                       55/55 checks behaved as required
+#20's checker, comment filter deleted          55/55 checks behaved as required
+   (mutation asserted landed by content first)
+```
+
+Two independent authors wrote a guard that cannot fire, and two independently
+written suites certified it. **Agreement between implementations is evidence
+about the property, not about the code that is unreachable in both** -- the
+differential control that caught a real over-strictness bug here previously is
+blind to this, because it compares outputs and an inert branch has none.
+
+*The missing `curl`.* A probe rig whose HTTP client was absent produced empty
+output for every row; the harness failed upstream of every case and the table
+stayed plausible.
+
+**Tell.** A row whose expected result is "nothing happened", with no separate
+evidence that the mechanism under test was active. Equivalently: a control that
+would read the same if the fixture were inert.
+
+**Fixture.** Every null-result experiment carries a positive control in the same
+run, proving the mechanism can produce a non-null. Every gate fixture is proved
+by mutating the property it asserts and requiring *that named row* to go red --
+if deleting the code under test changes no row, the row is decoration.
+
+**Measured, `httpd:2.4`:**
+
+```
+POSITIVE CONTROL   /doc  without MultiViews   -> 404
+                   /doc  with    MultiViews   -> 200 text/plain     mechanism live
+then
+  /robots.txt  +MultiViews                          -> 200 text/plain
+  /robots.txt  +MultiViews, robots.txt.html present -> 200 text/plain   genuine null
+```
+
+**Residual, open.** The filter is worth *retaining* -- if the anchor is ever
+relaxed it becomes load-bearing -- but as of this entry it is **not** labelled
+inert at the source, in either the checker or the row that appears to defend it.
+Until it is, the next reader re-derives confidence from a row that measures
+nothing, which is exactly how it survived two independent implementations. A
+one-line comment at each site closes it; it is left out of the change that
+records this shape only to keep that change to the files it is about.
+
+---
+
+## 14. The name predicts the behaviour
+
+Two independent implementations of one gate both got the same axis wrong, because
+both authors reasoned from what directives are *called* instead of measuring what
+they *do*. The corpus each one enumerated was a corpus of things its author had
+thought of, and the two authors had thought of overlapping but different things.
+
+**Instance.** `mod_headers` special-cases `Content-Type`: some actions reach
+`r->content_type`, others only touch the headers table and are then overwritten
+by the core. **This is not predictable from the action name**, and there is no
+grouping of the eight actions that a reader would guess correctly.
+
+```
+                                  robots.txt          finding?
+Header set        Content-Type    charset added       yes
+Header always set Content-Type    charset added       yes
+Header edit       Content-Type    text/plain->html    yes
+Header setifempty Content-Type    charset added       yes
+Header unset      Content-Type    header REMOVED, 200 yes
+Header add        Content-Type    unchanged           no
+Header append     Content-Type    unchanged           no
+Header merge      Content-Type    unchanged           no
+```
+
+One implementation matched *every* action and was over-strict on three. The other
+matched only `set` and missed four. Neither error was visible from the code: both
+clauses read as obviously right.
+
+The same shape produced the escapes. One arm's match set was `forcetype`,
+`defaulttype`, `addtype`, `header ... content-type` -- a list of directive names.
+`AddCharset` and `AddDefaultCharset` both retype `robots.txt` and were in nobody's
+list. Its 18 red arms and 10 green controls all passed while the hole was open,
+because **every fixture was written by someone reasoning about the same list.**
+
+**Tell.** The arm matches directive *identity*. Its comment enumerates spellings.
+Adding a new spelling requires editing the arm.
+
+**Fixture.** Reframe from *identity* to *reach*: does this configuration affect
+the target file. Reach is a property of the configuration; identity is a property
+of the author's memory. Then enumerate the corpus **by measurement** and pin
+every behaviourally-equivalent spelling as a case -- the reds and the greens, and
+the greens especially, because a suite of only reds cannot detect over-strictness
+(shape 6).
+
+**Rule.** *Growing the red arms and growing the green controls both fail here.
+The suite tests what its author thought of, and neither direction of growth
+escapes the author.*

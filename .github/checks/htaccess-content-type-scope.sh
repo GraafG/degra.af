@@ -64,6 +64,29 @@
 #   ForceType None / DefaultType none. These restore extension-based typing;
 #   they do not retype anything.
 #
+#   mod_negotiation / MultiViews. Not modelled, and now for a measured reason
+#   rather than an assumed one. Negotiation only engages when the exact request
+#   path does NOT exist, so an exact-name request for robots.txt cannot be
+#   retyped by it -- even with a competing robots.txt.html variant sitting next
+#   to it. Measured on httpd:2.4, with a positive control FIRST proving
+#   MultiViews was actually in effect, because the interesting rows here are all
+#   nulls and a null from an experiment that never ran is indistinguishable from
+#   a finding:
+#
+#     POSITIVE CONTROL   /doc  without MultiViews              -> 404
+#                        /doc  with    MultiViews              -> 200 text/plain
+#
+#     /robots.txt  no MultiViews                               -> 200 text/plain
+#     /robots.txt  +MultiViews                                 -> 200 text/plain
+#     /robots.txt  +MultiViews, robots.txt.html present        -> 200 text/plain
+#
+#   The first attempt at this produced a FALSE NULL and is worth recording: the
+#   variant used was doc.txt.en, and without AddLanguage the .en suffix is not a
+#   recognised extension, so MultiViews never engaged at all. Both rows returned
+#   404 and it read as "MultiViews changes nothing" -- the right conclusion from
+#   an experiment that never ran. Only the positive control caught it. See
+#   FAILURE-SHAPES.md, "the instrument that was never armed".
+#
 # Usage: htaccess-content-type-scope.sh [htaccess-path] [target-basename]
 
 set -euo pipefail
@@ -218,9 +241,19 @@ findings="$(
         #   Header edit       Content-Type  -> text/html                 CHANGED
         #   Header setifempty Content-Type  -> text/plain; charset=utf-8  CHANGED
         #   Header unset      Content-Type  -> no Content-Type at all    CHANGED
+        #   Header always unset Content-Type -> no Content-Type at all   CHANGED
         #   Header add        Content-Type  -> text/plain                unchanged
         #   Header append     Content-Type  -> text/plain                unchanged
         #   Header merge      Content-Type  -> text/plain                unchanged
+        #
+        # The unset rows deserve their own note, because gating them was at one
+        # point defended with "nobody writes that legitimately", which is an
+        # argument about authors rather than a measurement. Measured, it is a
+        # stronger finding than the argument was: unset does not merely change
+        # the type, it REMOVES the header entirely and the response is still
+        # 200. The client then has no declared type for robots.txt and sniffs.
+        # That is a real change to how the file is served, both spellings do it,
+        # and the gate is red on both.
         #
         # add/append/merge are therefore NOT findings. Gating them would be an
         # over-strict arm that is red on a working file, and the only reason
