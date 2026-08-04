@@ -67,6 +67,36 @@ all**. It never reached a single assertion. A probe that cannot locate its
 subject must fail loudly rather than search harder, and "no output yet" is
 indistinguishable from "working" for exactly as long as you are willing to wait.
 
+**And a second time, in the same PR, in the transport rows.** The fixture HTTP
+server was hosted in the test process. `execFileSync` **blocks the event loop**,
+so the server could never accept the connection its own child process was making,
+and all five URL rows timed out identically:
+
+```
+  ok         connection refused is red                     rc=1 marker=YES
+  ** MISMATCH a 404 is red, not 'no Expires found'         rc=1 marker=NO
+  ** MISMATCH a 500 is red, and says 500                   rc=1 marker=NO
+  ** MISMATCH an empty 200 body is red                     rc=1 marker=NO
+  ** MISMATCH an HTML error page served as 200 is red      rc=1 marker=NO
+  ** MISMATCH a well-formed file over HTTP passes          rc=1 marker=NO   <== the green
+```
+
+**All four reds still exited non-zero.** An rc-only scorer would have called them
+four working arms; they were four identical timeouts. The fault was *upstream of
+every case*, so every red agreed -- which is what thoroughness also looks like.
+The only row that discriminated was the **green**, because it is the one whose
+expected direction the common cause could not imitate.
+
+**Rule.** *When every red in a suite suddenly agrees, suspect a common cause
+rather than thorough coverage.* And the sharper corollary: **if the meta-control
+and the arm can both be satisfied by the same failure, the meta-control is not
+independent of the arm.** A green control sharing the same process, file and
+interpreter as the reds is not a control over any of those three.
+
+**Remedy, as shipped.** The fixture server runs in a separate process; the green
+row is ordered **first**, so an unreachable server fails immediately and marks
+the reds below it as uninterpretable rather than letting them read as working.
+
 **Measured, the version that matters most,** on the expiry suite:
 
 ```

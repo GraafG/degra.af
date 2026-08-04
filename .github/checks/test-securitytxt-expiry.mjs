@@ -43,9 +43,10 @@
  *     one healthy arm while a neighbour is inert.
  */
 import fs from "node:fs"
+import http from "node:http"
 import path from "node:path"
 import crypto from "node:crypto"
-import { execFileSync } from "node:child_process"
+import { execFileSync, spawn } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { checkExpiry, parseRfc3339, MIN_DAYS_REMAINING } from "./securitytxt-expiry.mjs"
 
@@ -417,13 +418,70 @@ const cRow = (label, args, wantRc, marker) => {
 // times out, or 404s produces exactly the same absence-shaped output as a served
 // file that lost the field, and absence-shaped output is produced identically by
 // "not there" and "didn't look properly". FAILURE-SHAPES.md #4.
+//
+// These run against a LOCAL server rather than the live site. A PR-time gate
+// that reaches the public internet acquires a failure mode unrelated to what it
+// measures - the same argument that keeps `npm ci` out of the daily workflow -
+// and a check that goes red when someone else's DNS is slow is a check that gets
+// muted. The live origin is the SCHEDULED workflow's job, and only its.
+//
+// The server runs in a SEPARATE PROCESS, and that is not tidiness. Hosting it in
+// this process failed in a way worth recording: `execFileSync` blocks the event
+// loop, so the server could never accept the connection its own child was
+// making, and all five URL rows timed out identically. Four were reds and passed
+// their rc check while failing their marker; the fifth was the GREEN row, and it
+// is the only reason the fault was visible at all. FAILURE-SHAPES.md #2.
+const SERVER_SRC = `
+const http = require("node:http")
+const fs = require("node:fs")
+// With node -e, the first extra argument lands at argv[1], not argv[2].
+const target = process.argv[1]
+if (!target) { console.error("fixture server: no target file argument"); process.exit(2) }
+const body = fs.readFileSync(target)
+const s = http.createServer((req, res) => {
+  if (req.url === "/500") { res.writeHead(500, {"content-type":"text/plain"}); res.end("upstream is unwell") }
+  else if (req.url === "/empty") { res.writeHead(200, {"content-type":"text/plain"}); res.end("") }
+  else if (req.url === "/html") { res.writeHead(200, {"content-type":"text/html"}); res.end("<!doctype html><html><body><h1>404 Not Found</h1></body></html>") }
+  else if (req.url === "/good") { res.writeHead(200, {"content-type":"text/plain"}); res.end(body) }
+  else { res.writeHead(404, {"content-type":"text/html"}); res.end("<!doctype html><html><body>Not Found</body></html>") }
+})
+s.listen(0, "127.0.0.1", () => console.log(s.address().port))
+`
+
+const child = spawn(process.execPath, ["-e", SERVER_SRC, SEC], { stdio: ["ignore", "pipe", "inherit"] })
+const port = await new Promise((resolve, reject) => {
+  const timer = setTimeout(() => reject(new Error("fixture server did not report a port")), 15000)
+  child.stdout.once("data", d => {
+    clearTimeout(timer)
+    resolve(String(d).trim())
+  })
+})
+const BASE = `http://127.0.0.1:${port}`
+
+// A port nothing is listening on, obtained by opening one and closing it, so
+// this is a genuine connection refusal rather than a DNS answer some resolvers
+// hijack with a search page.
+const dead = http.createServer()
+await new Promise(r => dead.listen(0, "127.0.0.1", r))
+const DEAD = `http://127.0.0.1:${dead.address().port}`
+await new Promise(r => dead.close(r))
+
+// Ordered so the GREEN row runs FIRST. If the fixture server is unreachable for
+// any reason, this row fails immediately and the reds below are known to be
+// uninterpretable, rather than being read as five arms working.
+cRow("a well-formed file over HTTP passes", ["--url", `${BASE}/good`], 0, "ok    Expires")
+cRow("connection refused is red", ["--url", `${DEAD}/.well-known/security.txt`], 1, "could not fetch")
 cRow("a host that does not resolve is red", ["--url", "https://nx.invalid/.well-known/security.txt"], 1, "could not fetch")
-cRow("a 404 is red, not 'no Expires found'", ["--url", "https://degra.af/definitely-missing-xyz"], 1, "returned HTTP 404")
-cRow("an HTML body is red, not parsed as a field-less file", ["--url", "https://degra.af/"], 1, "no Expires field")
+cRow("a 404 is red, not 'no Expires found'", ["--url", `${BASE}/nope`], 1, "returned HTTP 404")
+cRow("a 500 is red, and says 500", ["--url", `${BASE}/500`], 1, "returned HTTP 500")
+cRow("an empty 200 body is red", ["--url", `${BASE}/empty`], 1, "empty or unreadable")
+cRow("an HTML error page served as 200 is red", ["--url", `${BASE}/html`], 1, "no Expires field")
 cRow("a missing local file is red", ["--file", ".github/checks/nope.txt"], 1, "no such file")
 cRow("no argument is a usage error", [], 2, "usage:")
 cRow("--url with no value is a usage error", ["--url"], 2, "--url given with no value")
 cRow("the committed file passes via --file", ["--file", REL_SEC], 0, "ok    Expires")
+
+child.kill()
 
 // -------------------------------------------------------------- meta-control
 // A row helper that stopped scoring, or a layer whose subject vanished, shows up
