@@ -32,6 +32,11 @@ jobs:
   expiry:
     runs-on: ubuntu-latest
     name: Live security.txt is not expiring
+    # The retry budget is bounded but no longer trivial: two steps x three
+    # attempts x a 20s fetch timeout, plus backoff, is ~135s of worst case. A job
+    # with no ceiling would sit at that boundary silently, so the ceiling is
+    # written down where it can be compared against the budget it covers.
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
         with:
@@ -47,6 +52,15 @@ jobs:
       # No npm ci: the checker has no dependencies. Installing them would add a
       # daily failure mode unrelated to the thing being measured - a red here
       # must mean the served file is expiring, not that a registry was down.
+      #
+      # That sentence was aspirational until 2026-08-27. Three of the twenty runs
+      # before it - 08-16, 08-18, 08-27 - were red with `fetch failed` against an
+      # origin whose Expires was 341 days out, so a sixth of this gate's verdicts
+      # were about the transport rather than the property. The checker now makes
+      # three attempts before it believes "could not obtain", and prints the
+      # cause chain instead of undici's uniform `fetch failed`. Exhausting the
+      # attempts is still red: see the argument at `obtain` in the checker, which
+      # is the part that must not be relaxed.
       - name: Check the served security.txt
         run: node .github/checks/securitytxt-expiry.mjs --url https://degra.af/.well-known/security.txt
 
