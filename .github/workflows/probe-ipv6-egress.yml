@@ -1,0 +1,45 @@
+name: probe-ipv6-egress
+
+# THROWAWAY PROBE, dispatch-only. Delete this branch once the question is
+# settled. It follows the precedent of probe-paths-matcher and probe-real-filter:
+# when the question is "what does the platform actually do", the answer is
+# measured on the platform rather than reasoned about locally.
+#
+# It asserts nothing and gates nothing, so it has no polarity requirement. It is
+# an instrument, not a control.
+
+on:
+  workflow_dispatch:
+    inputs:
+      pairs:
+        description: "interleaved request pairs per run"
+        default: "40"
+      url:
+        description: "target URL"
+        default: "https://degra.af/.well-known/security.txt"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Three identical replicas. One run that happens to be clean proves nothing
+    # about an ~11% intermittent fault; three widen the sample and, because they
+    # are scheduled independently, sample different moments and hosts.
+    strategy:
+      fail-fast: false
+      matrix:
+        replica: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Probe
+        run: node .github/checks/probe-ipv6.mjs "${{ inputs.url }}" "${{ inputs.pairs }}"
