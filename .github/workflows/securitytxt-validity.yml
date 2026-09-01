@@ -53,14 +53,15 @@ jobs:
       # daily failure mode unrelated to the thing being measured - a red here
       # must mean the served file is expiring, not that a registry was down.
       #
-      # That sentence was aspirational until 2026-08-27. Three of the twenty runs
-      # before it - 08-16, 08-18, 08-27 - were red with `fetch failed` against an
-      # origin whose Expires was 341 days out, so a sixth of this gate's verdicts
-      # were about the transport rather than the property. The checker now makes
-      # three attempts before it believes "could not obtain", and prints the
-      # cause chain instead of undici's uniform `fetch failed`. Exhausting the
-      # attempts is still red: see the argument at `obtain` in the checker, which
-      # is the part that must not be relaxed.
+      # That sentence was aspirational until 2026-08-27. Five of this workflow's
+      # 27 scheduled runs - 08-07, 08-16, 08-18, 08-27, 08-31 - were red with
+      # `fetch failed` against an origin whose Expires was ~340 days out, so
+      # nearly a fifth of this gate's verdicts were about the transport rather
+      # than the property. The checker now makes three attempts before it
+      # believes "could not obtain", and prints the cause chain instead of
+      # undici's uniform `fetch failed`. Exhausting the attempts is still red:
+      # see the argument at `obtain` in the checker, which is the part that must
+      # not be relaxed.
       - name: Check the served security.txt
         run: node .github/checks/securitytxt-expiry.mjs --url https://degra.af/.well-known/security.txt
 

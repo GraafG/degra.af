@@ -520,12 +520,12 @@ cRow("no argument is a usage error", [], 2, "usage:")
 cRow("--url with no value is a usage error", ["--url"], 2, "--url given with no value")
 cRow("the committed file passes via --file", ["--file", REL_SEC], 0, "ok    Expires")
 
-// THE FLAKE ROW. Three of the last twenty scheduled runs were red on a transient
-// `fetch failed` against a healthy origin. Two lost sockets followed by a good
-// answer must be GREEN - that is the defect being fixed - and it must ANNOUNCE
-// the retry, because a green that needed three attempts and a green that needed
-// one are different events, and a fix that hid the difference would trade a
-// false red for an invisible degradation.
+// THE FLAKE ROW. Five of this workflow's 27 scheduled runs were red on a
+// transient `fetch failed` against a healthy origin. Two lost sockets followed
+// by a good answer must be GREEN - that is the defect being fixed - and it must
+// ANNOUNCE the retry, because a green that needed three attempts and a green
+// that needed one are different events, and a fix that hid the difference would
+// trade a false red for an invisible degradation.
 cRow(
   "two lost sockets then a good answer is GREEN, and says so",
   ["--url", `${BASE}/flaky`],

@@ -869,18 +869,18 @@ from the failure the gate exists to catch -- and because transport failures are
 *common* and the real failure is *rare*, the common one becomes what the red
 means.
 
-**Instance.** `security.txt validity` runs daily against the live origin. Of the
-twenty runs to 2026-08-27, **three were red** -- 08-16, 08-18, 08-27 -- each with
-the identical line:
+**Instance.** `security.txt validity` runs daily against the live origin. Across
+**every** scheduled run of that workflow to 2026-08-31 -- 27 runs -- **five were
+red**: 08-07, 08-16, 08-18, 08-27, 08-31. All five carried the identical line:
 
 ```
 FAIL  could not fetch https://degra.af/.well-known/security.txt: fetch failed
 ```
 
-On all three days the served file was healthy, `Expires 2027-08-03`, ~341 days
-out and nowhere near the 30-day margin. So 15% of this gate's verdicts were about
-a socket. The workflow's own comment had already stated the contract it was
-breaking -- *"a red here must mean the served file is expiring, not that a
+On all five days the served file was healthy, `Expires 2027-08-03`, ~340 days
+out and nowhere near the 30-day margin. So **18% of this gate's verdicts were
+about a socket**. The workflow's own comment had already stated the contract it
+was breaking -- *"a red here must mean the served file is expiring, not that a
 registry was down"* -- and the suite had already stated the consequence -- *"a
 check that goes red when someone else's DNS is slow is a check that gets muted"*.
 Both were written before the arm existed and neither was measured after it did.
@@ -888,10 +888,34 @@ Both were written before the arm existed and neither was measured after it did.
 There is a second defect stacked on the first, and it is #17 one level down.
 `fetch` rejects with `TypeError: fetch failed` for *every* transport fault --
 NXDOMAIN, refused, reset, expired certificate, timeout -- and the distinguishing
-detail lives in `err.cause`, which the arm discarded. Three failures produced
-three byte-identical lines. The message could not separate "the origin is gone"
-from "one packet was lost", so nobody could tell which had happened, which is
-precisely why it went uninvestigated for eleven days.
+detail lives in `err.cause`, which the arm discarded. Five failures produced five
+byte-identical lines. The message could not separate "the origin is gone" from
+"one packet was lost", so nobody could tell which had happened, which is
+precisely why it went uninvestigated for twenty-four days.
+
+**The rate above is itself a corrected measurement, and the correction is the
+lesson.** The fix was first written citing *"3 of the last 20 runs, 15%"*, taken
+from the default page of `gh run list --limit 20`. That window was not the
+population: the workflow had 27 scheduled runs, and the 20 most recent *runs*
+included other workflows' runs and excluded the 08-07 failure entirely. Asking
+the right question --
+
+```
+gh run list --workflow "security.txt validity" --event schedule --branch main --limit 100
+  -> failure 5, success 22
+```
+
+-- moved the count from 3/20 to 5/27 and surfaced a failure a month older than
+the "first" one. The direction matters: a convenience window **understated** the
+defect it was being used to justify fixing. A rate quoted from whatever the tool
+returned by default is a number about the tool's paging, not about the system.
+This is #16's rule -- *a sample drawn from a population the control was written
+to exclude* -- applied to the evidence for a fix rather than to a fixture.
+
+**And the recurrence is evidence too.** 08-31 happened *while the fix sat in an
+open, green, mergeable PR*. A gate's false-red rate keeps being paid until the
+fix is on the default branch; a correct fix in review is still a red dashboard,
+and a red dashboard is what teaches people to stop reading it.
 
 **Tell.** The gate crosses a network, container, or process boundary, and a
 failure to *obtain* the evidence exits with the same code and the same message

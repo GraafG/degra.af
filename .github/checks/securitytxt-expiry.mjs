@@ -238,12 +238,13 @@ export function checkExpiry(text, nowMs = Date.now(), minDays = MIN_DAYS_REMAINI
 /**
  * WHY THERE IS A RETRY HERE, and why it does not weaken the gate.
  *
- * Measured, this repo, the scheduled runs to 2026-08-27: 3 of the last 20 were
- * RED, all three with the identical line
+ * Measured, this repo, EVERY scheduled run of this workflow to 2026-08-31 -
+ * 27 runs, of which 5 were RED - 08-07, 08-16, 08-18, 08-27, 08-31 - all five
+ * with the identical line
  *
  *   FAIL  could not fetch https://degra.af/.well-known/security.txt: fetch failed
  *
- * and on all three days the served file was healthy - Expires 2027-08-03, ~341
+ * and on all five days the served file was healthy - Expires 2027-08-03, ~340
  * days out, nowhere near the 30-day margin. A single lost handshake was being
  * reported in the same shape, and with the same exit code, as "the security.txt
  * this repo publishes is about to become formally void".
@@ -252,10 +253,10 @@ export function checkExpiry(text, nowMs = Date.now(), minDays = MIN_DAYS_REMAINI
  * contract it was built to keep - "a red here must mean the served file is
  * expiring, not that a registry was down" - and the suite's layer C states the
  * consequence - "a check that goes red when someone else's DNS is slow is a
- * check that gets muted". A gate with a 15% false-red rate is a gate whose next
+ * check that gets muted". A gate with an 18% false-red rate is a gate whose next
  * true red is read as the flake it usually is. The instrument installed in
- * shape #9 to fire without a commit was, a sixth of the time, firing about the
- * transport instead of the property.
+ * shape #9 to fire without a commit was, nearly a fifth of the time, firing
+ * about the transport instead of the property.
  *
  * The dangerous fix is the tempting one: treat an unobtainable file as
  * inconclusive and exit 0. That reopens shape #4 exactly - absence-shaped output
