@@ -8,15 +8,15 @@ name: probe-ipv6-egress
 # It asserts nothing and gates nothing, so it has no polarity requirement. It is
 # an instrument, not a control.
 
+# Trigger is `push` on this branch only, not workflow_dispatch. That is not a
+# style choice: GitHub only exposes workflow_dispatch for workflows present on
+# the DEFAULT branch, so a dispatch-only probe on a side branch cannot be run at
+# all. The earlier probe-paths-matcher / probe-real-filter workflows used push
+# for the same reason.
 on:
-  workflow_dispatch:
-    inputs:
-      pairs:
-        description: "interleaved request pairs per run"
-        default: "40"
-      url:
-        description: "target URL"
-        default: "https://degra.af/.well-known/security.txt"
+  push:
+    branches:
+      - probe-ipv6-egress
 
 permissions:
   contents: read
@@ -42,4 +42,4 @@ jobs:
           node-version: 24
 
       - name: Probe
-        run: node .github/checks/probe-ipv6.mjs "${{ inputs.url }}" "${{ inputs.pairs }}"
+        run: node .github/checks/probe-ipv6.mjs "https://degra.af/.well-known/security.txt" 40
