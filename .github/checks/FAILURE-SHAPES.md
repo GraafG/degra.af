@@ -857,3 +857,105 @@ the arms' assertions need a version of the code where they are wrong.
 A marker matching every outcome of the branch it guards is decoration on top of
 the exit code, and it makes a suite look pinned in precisely the state where it
 is not.*
+
+---
+
+## 18. The gate that measures the transport reports it as the property
+
+A gate that reaches across a network measures two things and reports one number:
+the property it was built for, and its own ability to obtain the evidence. When
+those share an exit code and a message shape, a lost handshake is indistinguishable
+from the failure the gate exists to catch -- and because transport failures are
+*common* and the real failure is *rare*, the common one becomes what the red
+means.
+
+**Instance.** `security.txt validity` runs daily against the live origin. Across
+**every** scheduled run of that workflow to 2026-08-31 -- 27 runs -- **five were
+red**: 08-07, 08-16, 08-18, 08-27, 08-31. All five carried the identical line:
+
+```
+FAIL  could not fetch https://degra.af/.well-known/security.txt: fetch failed
+```
+
+On all five days the served file was healthy, `Expires 2027-08-03`, ~340 days
+out and nowhere near the 30-day margin. So **18% of this gate's verdicts were
+about a socket**. The workflow's own comment had already stated the contract it
+was breaking -- *"a red here must mean the served file is expiring, not that a
+registry was down"* -- and the suite had already stated the consequence -- *"a
+check that goes red when someone else's DNS is slow is a check that gets muted"*.
+Both were written before the arm existed and neither was measured after it did.
+
+There is a second defect stacked on the first, and it is #17 one level down.
+`fetch` rejects with `TypeError: fetch failed` for *every* transport fault --
+NXDOMAIN, refused, reset, expired certificate, timeout -- and the distinguishing
+detail lives in `err.cause`, which the arm discarded. Five failures produced five
+byte-identical lines. The message could not separate "the origin is gone" from
+"one packet was lost", so nobody could tell which had happened, which is
+precisely why it went uninvestigated for twenty-four days.
+
+**The rate above is itself a corrected measurement, and the correction is the
+lesson.** The fix was first written citing *"3 of the last 20 runs, 15%"*, taken
+from the default page of `gh run list --limit 20`. That window was not the
+population: the workflow had 27 scheduled runs, and the 20 most recent *runs*
+included other workflows' runs and excluded the 08-07 failure entirely. Asking
+the right question --
+
+```
+gh run list --workflow "security.txt validity" --event schedule --branch main --limit 100
+  -> failure 5, success 22
+```
+
+-- moved the count from 3/20 to 5/27 and surfaced a failure a month older than
+the "first" one. The direction matters: a convenience window **understated** the
+defect it was being used to justify fixing. A rate quoted from whatever the tool
+returned by default is a number about the tool's paging, not about the system.
+This is #16's rule -- *a sample drawn from a population the control was written
+to exclude* -- applied to the evidence for a fix rather than to a fixture.
+
+**And the recurrence is evidence too.** 08-31 happened *while the fix sat in an
+open, green, mergeable PR*. A gate's false-red rate keeps being paid until the
+fix is on the default branch; a correct fix in review is still a red dashboard,
+and a red dashboard is what teaches people to stop reading it.
+
+**Tell.** The gate crosses a network, container, or process boundary, and a
+failure to *obtain* the evidence exits with the same code and the same message
+shape as a failure of the property. Two questions find it: *how often is this red
+for a reason that is not the subject?* -- if the answer is more than never, the
+red no longer means what its name says -- and *does the failure message name the
+cause, or the layer that noticed it?*
+
+**The remedy that reopens #4.** Treating unobtainable as inconclusive and exiting
+green. That is exactly "the poll reports absence": a real outage becomes a pass,
+and the gate is now unable to report the one condition it was installed for. The
+rule stays: **every failure to obtain is red, never green.** Only the number of
+times "could not obtain" must be true before it is believed goes up.
+
+**Fixture.** Retry bounds are invisible to exit codes and to markers -- no-retry,
+retry-everything, and retry-forever all produce the same red on the same failure.
+Count the requests. The fixture server tallies hits per path, and the suite
+asserts a 404 costs exactly one request while a 503 costs exactly three.
+Measured, against six mutations of the shipped arm:
+
+```
+                                              rows moved (of 61)
+no retry at all (attempts = 1)                6
+retry is unbounded-ish (attempts = 6)         5
+everything is retryable, including a 404      1   <== only the count row sees this
+the retried green stops announcing itself     1
+the cause chain is discarded (err.message)    1
+the backoff knob silently defaults            2
+```
+
+Note the third row. Making a 404 retryable changes no exit code and no message in
+the entire suite; the request count is the *only* instrument that observes it.
+
+**And the green needs a fixture too.** A retry converts some reds into greens,
+which means it can also convert a *degrading* origin into a silent pass. The
+green must therefore say which attempt it succeeded on and annotate the run when
+that is not the first, and a row must pin that -- otherwise the fix trades a
+false red for an invisible decline.
+
+**Rule.** *A gate that crosses a boundary reports two things through one exit
+code. Retry until the transport is not the story, never until the property is not
+the story -- and count the attempts, because nothing else can see them.*
+

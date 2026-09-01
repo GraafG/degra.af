@@ -23,7 +23,11 @@
  *      for the claim that a build-time future-check would not have caught it
  *   B. the gate end to end, by mutating site/.well-known/security.txt and
  *      requiring the CLI to go red with a SPECIFIC marker
- *   C. the CLI's failure-to-obtain arms, which must be RED and never green
+ *   C. the CLI's obtain arms: every failure to obtain the file must be RED and
+ *      never green, a transient one must be RETRIED and then green, and the
+ *      retry itself must be measured by request COUNT - no exit code or message
+ *      in this suite can tell a bounded retry from an unbounded one, or a
+ *      retried 404 from a definitive one. Shape #18.
  *
  * Disciplines applied throughout, each of which caught something real in this
  * repo (see .github/checks/FAILURE-SHAPES.md):
@@ -233,13 +237,14 @@ const restore = () => {
   }
 }
 
-const runCli = args => {
+const runCli = (args, env = {}) => {
   try {
     const out = execFileSync(process.execPath, [CHECKER, ...args], {
       cwd: ROOT,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 60000,
+      env: { ...process.env, ...env },
     })
     return { rc: 0, out }
   } catch (e) {
@@ -403,15 +408,22 @@ restore()
 // ------------------------------------------------------------------ layer C
 console.log("\n=== C. the CLI must be RED when it cannot obtain the file ===")
 
-const cRow = (label, args, wantRc, marker) => {
-  const { rc, out } = runCli(args)
-  const hit = marker === null || out.includes(marker)
+// A row scores only if EVERY required marker is present. Taking a list rather
+// than one string is what lets a row separate states a single substring cannot:
+// "red, and after exactly three attempts, and naming the third cause" is three
+// facts, and a row that pinned only the first would pass on a checker that had
+// stopped retrying altogether. Shape #17.
+const cRow = (label, args, wantRc, marker, env = {}) => {
+  const { rc, out } = runCli(args, env)
+  const markers = marker === null ? [] : Array.isArray(marker) ? marker : [marker]
+  const missing = markers.filter(m => !out.includes(m))
+  const hit = missing.length === 0
   const ok = wantRc === 0 ? rc === 0 && hit : rc !== 0 && hit
   if (ok) {
     if (wantRc === 0) polarity.C.green++
     else polarity.C.red++
   }
-  note(ok, label, `rc=${rc} marker=${hit ? "YES" : "NO"}`)
+  note(ok, label, `rc=${rc} marker=${hit ? "YES" : `MISSING ${JSON.stringify(missing)}`}`)
 }
 
 // Failure to OBTAIN must never look like a clean read. A fetch that throws,
@@ -438,11 +450,30 @@ const fs = require("node:fs")
 const target = process.argv[1]
 if (!target) { console.error("fixture server: no target file argument"); process.exit(2) }
 const body = fs.readFileSync(target)
+// Requests are COUNTED per path. This is what turns "a 404 is not retried" from
+// a claim in a comment into a measurement: the retry is invisible to exit codes
+// and markers alike - a checker that retried a 404 three times would emit the
+// identical red - and the request count is the only place the difference exists.
+const hits = Object.create(null)
 const s = http.createServer((req, res) => {
-  if (req.url === "/500") { res.writeHead(500, {"content-type":"text/plain"}); res.end("upstream is unwell") }
-  else if (req.url === "/empty") { res.writeHead(200, {"content-type":"text/plain"}); res.end("") }
-  else if (req.url === "/html") { res.writeHead(200, {"content-type":"text/html"}); res.end("<!doctype html><html><body><h1>404 Not Found</h1></body></html>") }
-  else if (req.url === "/good") { res.writeHead(200, {"content-type":"text/plain"}); res.end(body) }
+  const path = req.url.split("?")[0]
+  if (path.startsWith("/count/")) {
+    res.writeHead(200, {"content-type":"text/plain"})
+    res.end(String(hits["/" + path.slice("/count/".length)] || 0))
+    return
+  }
+  hits[path] = (hits[path] || 0) + 1
+  if (path === "/500") { res.writeHead(500, {"content-type":"text/plain"}); res.end("upstream is unwell") }
+  else if (path === "/empty") { res.writeHead(200, {"content-type":"text/plain"}); res.end("") }
+  else if (path === "/html") { res.writeHead(200, {"content-type":"text/html"}); res.end("<!doctype html><html><body><h1>404 Not Found</h1></body></html>") }
+  else if (path === "/good") { res.writeHead(200, {"content-type":"text/plain"}); res.end(body) }
+  // The observed production failure, reproduced in its own shape: the first two
+  // attempts lose the socket before any response - which is what "fetch failed"
+  // was - and the third is served normally.
+  else if (path === "/flaky") {
+    if (hits[path] < 3) { req.destroy() }
+    else { res.writeHead(200, {"content-type":"text/plain"}); res.end(body) }
+  }
   else { res.writeHead(404, {"content-type":"text/html"}); res.end("<!doctype html><html><body>Not Found</body></html>") }
 })
 s.listen(0, "127.0.0.1", () => console.log(s.address().port))
@@ -466,20 +497,87 @@ await new Promise(r => dead.listen(0, "127.0.0.1", r))
 const DEAD = `http://127.0.0.1:${dead.address().port}`
 await new Promise(r => dead.close(r))
 
+// The retry's backoff is scaled to zero for the rows that exhaust it. This is a
+// TIMING knob and only a timing knob - it cannot change an attempt count or a
+// verdict - so these rows take exactly the branches production takes, minus the
+// sleeping. The row below that feeds it a bad value proves it is validated
+// rather than silently defaulted, which is what stops it becoming a knob that is
+// believed to do something it does not.
+const FAST = { SECURITYTXT_EXPIRY_BACKOFF_MS: "0" }
+
 // Ordered so the GREEN row runs FIRST. If the fixture server is unreachable for
 // any reason, this row fails immediately and the reds below are known to be
 // uninterpretable, rather than being read as five arms working.
 cRow("a well-formed file over HTTP passes", ["--url", `${BASE}/good`], 0, "ok    Expires")
-cRow("connection refused is red", ["--url", `${DEAD}/.well-known/security.txt`], 1, "could not fetch")
-cRow("a host that does not resolve is red", ["--url", "https://nx.invalid/.well-known/security.txt"], 1, "could not fetch")
+cRow("connection refused is red", ["--url", `${DEAD}/.well-known/security.txt`], 1, ["could not fetch", "after 3 attempts", "ECONNREFUSED"], FAST)
+cRow("a host that does not resolve is red", ["--url", "https://nx.invalid/.well-known/security.txt"], 1, ["could not fetch", "after 3 attempts", "attempt 3/3:"], FAST)
 cRow("a 404 is red, not 'no Expires found'", ["--url", `${BASE}/nope`], 1, "returned HTTP 404")
-cRow("a 500 is red, and says 500", ["--url", `${BASE}/500`], 1, "returned HTTP 500")
+cRow("a 500 is red, and says 500", ["--url", `${BASE}/500`], 1, ["returned HTTP 500", "after 3 attempts"], FAST)
 cRow("an empty 200 body is red", ["--url", `${BASE}/empty`], 1, "empty or unreadable")
 cRow("an HTML error page served as 200 is red", ["--url", `${BASE}/html`], 1, "no Expires field")
 cRow("a missing local file is red", ["--file", ".github/checks/nope.txt"], 1, "no such file")
 cRow("no argument is a usage error", [], 2, "usage:")
 cRow("--url with no value is a usage error", ["--url"], 2, "--url given with no value")
 cRow("the committed file passes via --file", ["--file", REL_SEC], 0, "ok    Expires")
+
+// THE FLAKE ROW. Five of this workflow's 27 scheduled runs were red on a
+// transient `fetch failed` against a healthy origin. Two lost sockets followed
+// by a good answer must be GREEN - that is the defect being fixed - and it must
+// ANNOUNCE the retry, because a green that needed three attempts and a green
+// that needed one are different events, and a fix that hid the difference would
+// trade a false red for an invisible degradation.
+cRow(
+  "two lost sockets then a good answer is GREEN, and says so",
+  ["--url", `${BASE}/flaky`],
+  0,
+  ["on attempt 3/3", "ok    Expires", "::warning::"],
+  FAST,
+)
+cRow(
+  "a malformed backoff knob is a usage error, not a silent default",
+  ["--url", `${BASE}/good`],
+  2,
+  "SECURITYTXT_EXPIRY_BACKOFF_MS must be",
+  { SECURITYTXT_EXPIRY_BACKOFF_MS: "soon" },
+)
+
+// Request counts, read from the fixture server after the rows above have run.
+//
+// These are the only assertions here that can tell a bounded retry from an
+// unbounded one, or a retried 404 from a definitive one: every one of those
+// variants produces the same exit code and the same message, so the rows above
+// pass on all of them. They are NOT scored into the polarity ledger - they are
+// not verdict rows, and counting them as greens would inflate a number whose
+// only job is to prove a verdict row of each sign still fires.
+// Deliberately node:http with `agent: false`, not fetch. Using fetch here left
+// undici's keep-alive pool holding a socket to a server this suite then kills,
+// and the process aborted inside libuv at exit - `Assertion failed:
+// !(handle->flags & UV_HANDLE_CLOSING)`, exit code 0xC0000409 - AFTER printing
+// 61/61. A suite that reports every row green and then dies on the way out is
+// shape #2 wearing the opposite mask: the exit code says failure, the rows say
+// success, and whichever one the caller reads is the answer it gets.
+const hitCount = name =>
+  new Promise((resolve, reject) => {
+    const req = http.get({ host: "127.0.0.1", port, path: `/count/${name}`, agent: false }, res => {
+      let body = ""
+      res.setEncoding("utf8")
+      res.on("data", d => (body += d))
+      res.on("end", () => resolve(Number(body)))
+    })
+    req.on("error", reject)
+    req.setTimeout(10000, () => req.destroy(new Error(`count query for ${name} timed out`)))
+  })
+const countRow = async (label, name, want) => {
+  const got = await hitCount(name)
+  note(got === want, label, `requests=${got} want=${want}`)
+}
+await countRow("a 404 costs exactly one request - definitive answers are not retried", "nope", 1)
+await countRow("a 500 is retried, and stops at the attempt limit", "500", 3)
+await countRow("a transient failure stops as soon as it succeeds", "flaky", 3)
+// The knob is validated before any request is made, so this row's URL is never
+// fetched - which is itself the assertion: a bad knob must fail before it can
+// influence a measurement.
+await countRow("a healthy origin is fetched exactly once", "good", 1)
 
 child.kill()
 

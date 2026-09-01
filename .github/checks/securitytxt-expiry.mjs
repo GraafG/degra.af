@@ -58,6 +58,11 @@
  * about what "valid" means. Only the scheduled one closes the hole; the PR arm
  * catches a value mistyped into the past, which is a real but different class.
  *
+ * OBTAINING the file and JUDGING it are separate concerns and are kept apart
+ * below: parseRfc3339 and checkExpiry stay pure and network-free, and everything
+ * about fetching - including the bounded retry that stops a lost handshake being
+ * reported as an expiring file, FAILURE-SHAPES.md #18 - lives at `obtain`.
+ *
  * CLI:  node .github/checks/securitytxt-expiry.mjs --url https://degra.af/.well-known/security.txt
  *       node .github/checks/securitytxt-expiry.mjs --file site/.well-known/security.txt
  */
@@ -228,6 +233,171 @@ export function checkExpiry(text, nowMs = Date.now(), minDays = MIN_DAYS_REMAINI
   }
 }
 
+// --------------------------------------------------------------- obtaining
+
+/**
+ * WHY THERE IS A RETRY HERE, and why it does not weaken the gate.
+ *
+ * Measured, this repo, EVERY scheduled run of this workflow to 2026-08-31 -
+ * 27 runs, of which 5 were RED - 08-07, 08-16, 08-18, 08-27, 08-31 - all five
+ * with the identical line
+ *
+ *   FAIL  could not fetch https://degra.af/.well-known/security.txt: fetch failed
+ *
+ * and on all five days the served file was healthy - Expires 2027-08-03, ~340
+ * days out, nowhere near the 30-day margin. A single lost handshake was being
+ * reported in the same shape, and with the same exit code, as "the security.txt
+ * this repo publishes is about to become formally void".
+ *
+ * That is not a cosmetic complaint. This workflow's own comment states the
+ * contract it was built to keep - "a red here must mean the served file is
+ * expiring, not that a registry was down" - and the suite's layer C states the
+ * consequence - "a check that goes red when someone else's DNS is slow is a
+ * check that gets muted". A gate with an 18% false-red rate is a gate whose next
+ * true red is read as the flake it usually is. The instrument installed in
+ * shape #9 to fire without a commit was, nearly a fifth of the time, firing
+ * about the transport instead of the property.
+ *
+ * The dangerous fix is the tempting one: treat an unobtainable file as
+ * inconclusive and exit 0. That reopens shape #4 exactly - absence-shaped output
+ * is produced identically by "not there" and "didn't look properly" - and it
+ * would make a real outage green. So the rule the original comment states is
+ * kept verbatim and is NOT negotiable here:
+ *
+ *   EVERY FAILURE TO OBTAIN THE FILE IS STILL RED, NEVER GREEN.
+ *
+ * The only thing that changes is how many times "could not obtain" has to be
+ * true before it is believed. Exhausting the attempts is red, with the same exit
+ * code as before; nothing about this is configurable, and no flag or environment
+ * variable can reduce the attempt count or turn an exhausted retry green.
+ */
+
+// Three attempts. Two leaves the whole verdict resting on the second one, and
+// more than three turns a measurement into waiting for an origin to come back,
+// which is a different job with a different answer.
+export const FETCH_ATTEMPTS = 3
+
+// Between attempts. Short and fixed: a daily job can afford seven seconds, and
+// an origin still refusing after that is having an outage - which IS a red, and
+// should be reported as one on the day it happens rather than slept through.
+export const RETRY_BACKOFF_MS = [2000, 5000]
+
+export const FETCH_TIMEOUT_MS = 20000
+
+/**
+ * Statuses that mean "not now" rather than "no".
+ *
+ * The distinction is the whole point, and it is asserted by request COUNT in the
+ * suite, not by prose: a 404 is a definitive answer about the file and must cost
+ * exactly one request, while a 503 is the origin declining to answer and is
+ * worth asking again. Retrying a 404 would convert a real, immediate red into a
+ * slow one and teach the gate to poll; not retrying a 503 is the flake this
+ * whole section exists to remove.
+ */
+export function isRetryableStatus(status) {
+  return status === 408 || status === 425 || status === 429 || status >= 500
+}
+
+/**
+ * Render an error AND its cause chain.
+ *
+ * `fetch` rejects with `TypeError: fetch failed` for every transport fault there
+ * is - NXDOMAIN, connection refused, a reset mid-handshake, an expired
+ * certificate, a timeout. The distinguishing detail is in `err.cause`, and
+ * printing only `err.message` threw it away: the three real failures above are
+ * byte-identical lines that cannot tell those cases apart. This is shape #17 one
+ * level down - a message that matches every state it covers separates none of
+ * them - applied to the diagnostic instead of to a test's pin.
+ */
+export function describeError(err) {
+  const parts = []
+  const seen = new Set()
+  let e = err
+  while (e && typeof e === "object" && !seen.has(e)) {
+    seen.add(e)
+    const code = e.code ? ` [${e.code}]` : ""
+    parts.push(`${e.name ?? "Error"}: ${e.message}${code}`)
+    e = e.cause
+  }
+  return parts.length ? parts.join(" <- ") : String(err)
+}
+
+/**
+ * Fetch `url`, retrying only failures to OBTAIN it.
+ *
+ * @returns {Promise<{ok: true, text: string, attempt: number, attempts: number}
+ *                  | {ok: false, failures: Array<{retryable: boolean,
+ *                     status: number|null, detail: string}>}>}
+ */
+export async function obtain(url, opts = {}) {
+  const {
+    attempts = FETCH_ATTEMPTS,
+    backoffMs = RETRY_BACKOFF_MS,
+    timeoutMs = FETCH_TIMEOUT_MS,
+    fetchImpl = fetch,
+    sleep = ms => new Promise(r => setTimeout(r, ms)),
+    log = () => {},
+  } = opts
+
+  const failures = []
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    let failure
+    try {
+      const res = await fetchImpl(url, {
+        redirect: "follow",
+        signal: AbortSignal.timeout(timeoutMs),
+        headers: { "user-agent": "degra-af-securitytxt-expiry-check" },
+      })
+      if (res.status === 200) {
+        // The body is read inside the try on purpose: a socket that dies while
+        // the body is streaming is the same "the answer never arrived intact"
+        // case as one that dies during the handshake, and reading it outside
+        // would make that single case the one unretried transport fault.
+        const text = await res.text()
+        return { ok: true, text, attempt, attempts }
+      }
+      failure = {
+        retryable: isRetryableStatus(res.status),
+        status: res.status,
+        detail: `HTTP ${res.status}`,
+      }
+    } catch (err) {
+      failure = { retryable: true, status: null, detail: describeError(err) }
+    }
+
+    failures.push(failure)
+    if (!failure.retryable || attempt === attempts) break
+
+    const wait = backoffMs[attempt - 1] ?? backoffMs.at(-1) ?? 0
+    log(`note  attempt ${attempt}/${attempts} could not obtain ${url}: ${failure.detail} - retrying in ${wait}ms`)
+    await sleep(wait)
+  }
+  return { ok: false, failures }
+}
+
+/**
+ * Timing knob, for the suite only.
+ *
+ * It scales the WAIT and nothing else - not the attempt count, not the timeout,
+ * not any verdict - so a suite that sets it to 0 measures exactly the branches
+ * production takes, minus seven seconds of sleeping. It is validated rather than
+ * defaulted: a typo'd value exits 2 instead of silently reverting to the real
+ * backoff, because a fixture that quietly ran the slow path is a fixture whose
+ * timing you cannot reason about, and a silent fallback is how a knob comes to
+ * be believed to do something it does not.
+ */
+export function backoffFromEnv(env = process.env, fallback = RETRY_BACKOFF_MS) {
+  const raw = env.SECURITYTXT_EXPIRY_BACKOFF_MS
+  if (raw === undefined || raw === "") return { ok: true, backoffMs: fallback }
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n < 0)
+    return {
+      ok: false,
+      message: `SECURITYTXT_EXPIRY_BACKOFF_MS must be a non-negative number of milliseconds, got ${JSON.stringify(raw)}`,
+    }
+  return { ok: true, backoffMs: [n] }
+}
+
 // ------------------------------------------------------------------- CLI
 
 async function main(argv) {
@@ -242,27 +412,51 @@ async function main(argv) {
       console.error("FAIL  --url given with no value")
       return 2
     }
+    const backoff = backoffFromEnv()
+    if (!backoff.ok) {
+      console.error(`FAIL  ${backoff.message}`)
+      return 2
+    }
     // Every failure to OBTAIN the file is red, never green. A fetch that throws,
     // times out, or returns 404 produces exactly the same "no Expires found"
     // shape as a served file that lost the field, and absence-shaped output is
-    // produced identically by "not there" and "didn't look properly".
-    let res
-    try {
-      res = await fetch(source, {
-        redirect: "follow",
-        signal: AbortSignal.timeout(20000),
-        headers: { "user-agent": "degra-af-securitytxt-expiry-check" },
-      })
-    } catch (err) {
-      console.error(`FAIL  could not fetch ${source}: ${err.message}`)
+    // produced identically by "not there" and "didn't look properly". What the
+    // retry above changes is only how many times that has to be true.
+    const got = await obtain(source, {
+      backoffMs: backoff.backoffMs,
+      log: msg => console.error(msg),
+    })
+    if (!got.ok) {
+      // The LAST failure picks the message shape - it is the final word on why
+      // this run has no file - and every attempt's own cause is printed under
+      // it, because "three attempts, three different causes" and "three
+      // attempts, the same cause" are different diagnoses and the summary line
+      // cannot carry both.
+      const last = got.failures[got.failures.length - 1]
+      const n = got.failures.length
+      const tried = n === 1 ? "" : ` after ${n} attempts`
+      const head =
+        last.status === null
+          ? `could not fetch ${source}${tried}: ${last.detail}`
+          : `${source} returned HTTP ${last.status}${tried}, expected 200`
+      console.error(`FAIL  ${head}`)
+      if (n > 1)
+        for (const [i, f] of got.failures.entries())
+          console.error(`      attempt ${i + 1}/${n}: ${f.detail}`)
+      console.error(`::error::security.txt unobtainable: ${head}`)
       return 1
     }
-    if (res.status !== 200) {
-      console.error(`FAIL  ${source} returned HTTP ${res.status}, expected 200`)
-      return 1
-    }
-    text = await res.text()
-    console.log(`fetched ${source} (${Buffer.byteLength(text)} bytes)`)
+    text = got.text
+    const onAttempt = got.attempt > 1 ? ` on attempt ${got.attempt}/${got.attempts}` : ""
+    console.log(`fetched ${source} (${Buffer.byteLength(text)} bytes)${onAttempt}`)
+    // A green that needed a retry is not the same event as a green that did not,
+    // and burying that difference in the log is how a degrading origin stays
+    // invisible until the day it degrades past three attempts. The run stays
+    // green - the property being measured is fine - but it says so out loud.
+    if (got.attempt > 1)
+      console.log(
+        `::warning::${source} needed ${got.attempt} attempts to fetch; the Expires check is green but the origin was not answering first time`,
+      )
   } else if (fileIdx !== -1) {
     source = argv[fileIdx + 1]
     const fs = await import("node:fs")
