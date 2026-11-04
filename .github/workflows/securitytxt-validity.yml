@@ -38,14 +38,14 @@ jobs:
     # written down where it can be compared against the budget it covers.
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # Nothing here pushes, so the GITHUB_TOKEN has no reason to be written
           # to .git/config as an http.extraheader.
           persist-credentials: false
 
       - name: Setup node
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 24
 
